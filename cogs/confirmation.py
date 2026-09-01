@@ -44,7 +44,7 @@ DEFAULT_GCASH_TEXT = (
     "> no receipt = no transaction"
 )
 
-PING_PREFIX = ":c_heart~1:"
+PING_PREFIX = "          one last check,   :c_heart:    "
 
 SAMPLE_ORDER = {
     "item": "pinned post",
