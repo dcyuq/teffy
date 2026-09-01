@@ -92,6 +92,7 @@ DEFAULT_PANEL = {
     "message_id": None,
     "mode": "embed_title",
     "layout": "buttons",
+    "placeholder": "open a ticket",
     "title": "Support Tickets",
     "description": "Click a button below to open a private ticket.",
     "color": embeds.ACCENT.value,
@@ -338,6 +339,7 @@ def ensure_config(guild_id):
     settings.setdefault("staff_role_ids", [])
     settings["panel"].setdefault("mode", "embed_title")
     settings["panel"].setdefault("layout", "buttons")
+    settings["panel"].setdefault("placeholder", "open a ticket")
 
     legacy = settings.pop("staff_role_id", None)
     if legacy and legacy not in settings["staff_role_ids"]:
@@ -427,7 +429,7 @@ def clean_url(text):
 def build_panel_view(guild_id, settings):
     panel = settings["panel"]
     if panel.get("layout") == "dropdown":
-        return DropdownPanelView(guild_id, settings["buttons"])
+        return DropdownPanelView(guild_id, settings["buttons"], panel.get("placeholder"))
     if panel_mode(panel) == "bare":
         return BarePanelView(guild_id, settings["buttons"])
     return PanelView(guild_id, settings["buttons"])
@@ -968,7 +970,7 @@ class BarePanelView(discord.ui.LayoutView):
         self.add_item(row)
 
 class TicketSelect(discord.ui.Select):
-    def __init__(self, guild_id, buttons):
+    def __init__(self, guild_id, buttons, placeholder):
         options = [
             discord.SelectOption(
                 label=button_data["label"][:100],
@@ -978,7 +980,7 @@ class TicketSelect(discord.ui.Select):
             for button_data in buttons[:25]
         ]
         super().__init__(
-            placeholder="open a ticket",
+            placeholder=(placeholder or "open a ticket")[:150],
             custom_id=f"ticket:select:{guild_id}",
             min_values=1,
             max_values=1,
@@ -1010,9 +1012,9 @@ class TicketSelect(discord.ui.Select):
 
 
 class DropdownPanelView(discord.ui.View):
-    def __init__(self, guild_id, buttons):
+    def __init__(self, guild_id, buttons, placeholder):
         super().__init__(timeout=None)
-        self.add_item(TicketSelect(guild_id, buttons))
+        self.add_item(TicketSelect(guild_id, buttons, placeholder))
 
 
 class TicketControlView(discord.ui.View):
@@ -1314,6 +1316,26 @@ class PanelModeSelect(discord.ui.Select):
         )
         await self.builder.refresh()
 
+class MenuTextModal(discord.ui.Modal, title="Dropdown text"):
+    def __init__(self, builder):
+        super().__init__()
+        self.builder = builder
+        self.field = discord.ui.TextInput(
+            label="dropdown placeholder",
+            default=(builder.settings["panel"].get("placeholder") or "open a ticket")[:150],
+            max_length=150,
+            required=True,
+        )
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction):
+        self.builder.settings["panel"]["placeholder"] = self.field.value.strip() or "open a ticket"
+        save_config()
+        refreshed = AppearanceView(self.builder)
+        await interaction.response.edit_message(content=refreshed.blurb(), view=refreshed)
+        await self.builder.refresh()
+
+
 class AppearanceView(discord.ui.View):
     def __init__(self, builder):
         super().__init__(timeout=300)
@@ -1333,10 +1355,14 @@ class AppearanceView(discord.ui.View):
         }
         layout = self.builder.settings["panel"].get("layout", "buttons")
         pick = "a dropdown menu" if layout == "dropdown" else "buttons"
-        return (
+        text = (
             f"**{panel_mode_label(self.builder.settings['panel'])}** - {notes[mode]}\n"
             f"options show as **{pick}**"
         )
+        if layout == "dropdown":
+            placeholder = self.builder.settings["panel"].get("placeholder") or "open a ticket"
+            text += f"\ndropdown text : {placeholder}"
+        return text
 
     @discord.ui.button(label="Edit Text & Images", style=discord.ButtonStyle.secondary, row=1)
     async def edit_text(self, interaction, button):
@@ -1352,6 +1378,10 @@ class AppearanceView(discord.ui.View):
         refreshed = AppearanceView(self.builder)
         await interaction.response.edit_message(content=refreshed.blurb(), view=refreshed)
         await self.builder.refresh()
+
+    @discord.ui.button(label="Dropdown text", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_menu_text(self, interaction, button):
+        await interaction.response.send_modal(MenuTextModal(self.builder))
 
 class SettingsView(discord.ui.View):
     def __init__(self, builder):
