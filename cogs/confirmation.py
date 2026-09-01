@@ -1,10 +1,12 @@
 import logging
+import re
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 import embeds
+import emojiutils
 import templating
 from storage import Store
 
@@ -14,9 +16,7 @@ FIELD_LIMIT = 200
 NOTES_LIMIT = 500
 FORMAT_LIMIT = 2000
 LABEL_LIMIT = 80
-URL_LIMIT = 500
 
-DEFAULT_INTRO = "please double check if your order is correct."
 DEFAULT_CONFIRM_FORMAT = (
     "**order confirmation**\n"
     "\n"
@@ -62,6 +62,16 @@ ALIASES = {
     "user": "user", "customer": "user", "buyer": "user",
 }
 
+IMAGE_URL = re.compile(
+    r"(?<![(\[<])\bhttps?://[^\s<>()\[\]]+?"
+    r"\.(?:png|jpe?g|gif|webp|avif)"
+    r"(?:\?[^\s<>()\[\]]*)?",
+    re.IGNORECASE,
+)
+
+CUSTOM_EMOJI = re.compile(r"^(<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>)\s*(.*)$", re.DOTALL)
+SHORTCODE = re.compile(r"^:([A-Za-z0-9_~]{2,32}):\s*(.*)$", re.DOTALL)
+
 _store = Store("confirmation_config.json")
 config = _store.load()
 
@@ -72,14 +82,12 @@ def save_config():
 
 def defaults():
     return {
-        "intro": DEFAULT_INTRO,
         "confirm_format": DEFAULT_CONFIRM_FORMAT,
         "footer": DEFAULT_FOOTER,
         "confirm_button": DEFAULT_CONFIRM_BUTTON,
         "received_format": DEFAULT_RECEIVED,
         "gcash_button": DEFAULT_GCASH_BUTTON,
         "gcash_text": DEFAULT_GCASH_TEXT,
-        "gcash_image": None,
     }
 
 
@@ -111,16 +119,52 @@ def render(template, order, author_id, guild):
     return templating.render(template, order_values(order, author_id), ALIASES, guild)
 
 
-def clamp_label(text, fallback):
-    text = (text or "").strip()
-    return (text or fallback)[:LABEL_LIMIT]
+def split_image(body):
+    matches = list(IMAGE_URL.finditer(body))
+    if not matches:
+        return body, None
+    last = matches[-1]
+    trimmed = body[: last.start()] + body[last.end():]
+    return trimmed.strip(), last.group(0)
+
+
+def split_button_label(raw, guild, fallback):
+    text = (raw or "").strip()
+    if not text:
+        return None, fallback[:LABEL_LIMIT]
+
+    match = CUSTOM_EMOJI.match(text)
+    if match:
+        try:
+            emoji = discord.PartialEmoji.from_str(match.group(1))
+        except (ValueError, TypeError):
+            emoji = None
+        return emoji, (match.group(2).strip() or fallback)[:LABEL_LIMIT]
+
+    match = SHORTCODE.match(text)
+    if match:
+        found = emojiutils.find_named(guild, match.group(1)) if guild else None
+        return (found if found else None), (match.group(2).strip() or fallback)[:LABEL_LIMIT]
+
+    head, _, rest = text.partition(" ")
+    if emojiutils.valid_shape(head) and not head.startswith(("<", ":")):
+        return head, (rest.strip() or fallback)[:LABEL_LIMIT]
+
+    return None, text[:LABEL_LIMIT]
+
+
+def apply_label(button, raw, guild, fallback):
+    emoji, label = split_button_label(raw, guild, fallback)
+    button.label = label
+    if emoji is not None:
+        button.emoji = emoji
 
 
 class ConfirmRow(discord.ui.ActionRow):
-    def __init__(self, parent, label):
+    def __init__(self, parent, raw, guild):
         super().__init__()
         self.owner = parent
-        self.go.label = clamp_label(label, "confirm order")
+        apply_label(self.go, raw, guild, "confirm order")
 
     @discord.ui.button(style=discord.ButtonStyle.secondary)
     async def go(self, interaction, button):
@@ -138,9 +182,7 @@ class ConfirmView(discord.ui.LayoutView):
 
     def build(self):
         self.clear_items()
-        intro = (self.settings.get("intro") or "").strip()
-        if intro:
-            self.add_item(discord.ui.TextDisplay(f"{intro} <@{self.author_id}>"))
+        self.add_item(discord.ui.TextDisplay(f"<@{self.author_id}>"))
 
         box = discord.ui.Container()
         box.add_item(discord.ui.TextDisplay(
@@ -150,7 +192,7 @@ class ConfirmView(discord.ui.LayoutView):
         if footer:
             box.add_item(discord.ui.TextDisplay(footer[:1000]))
         box.add_item(discord.ui.Separator())
-        box.add_item(ConfirmRow(self, self.settings.get("confirm_button")))
+        box.add_item(ConfirmRow(self, self.settings.get("confirm_button"), self.guild))
         self.add_item(box)
 
     async def interaction_check(self, interaction):
@@ -167,10 +209,10 @@ class ConfirmView(discord.ui.LayoutView):
 
 
 class GcashRow(discord.ui.ActionRow):
-    def __init__(self, parent, label):
+    def __init__(self, parent, raw, guild):
         super().__init__()
         self.owner = parent
-        self.pick.label = clamp_label(label, "gcash")
+        apply_label(self.pick, raw, guild, "gcash")
 
     @discord.ui.button(style=discord.ButtonStyle.secondary)
     async def pick(self, interaction, button):
@@ -193,7 +235,7 @@ class PaymentView(discord.ui.LayoutView):
             render(self.settings["received_format"], self.order, self.author_id, self.guild)[:4000]
         ))
         box.add_item(discord.ui.Separator())
-        box.add_item(GcashRow(self, self.settings.get("gcash_button")))
+        box.add_item(GcashRow(self, self.settings.get("gcash_button"), self.guild))
         self.add_item(box)
 
     async def interaction_check(self, interaction):
@@ -215,13 +257,13 @@ class GcashBox(discord.ui.LayoutView):
     def __init__(self, settings, order, author_id, guild):
         super().__init__(timeout=None)
         box = discord.ui.Container()
-        box.add_item(discord.ui.TextDisplay(
-            render(settings["gcash_text"], order, author_id, guild)[:4000]
-        ))
-        image = settings.get("gcash_image")
-        if image:
+        body = render(settings["gcash_text"], order, author_id, guild)
+        body, image_url = split_image(body)
+        if body.strip():
+            box.add_item(discord.ui.TextDisplay(body[:4000]))
+        if image_url:
             gallery = discord.ui.MediaGallery()
-            gallery.add_item(media=image)
+            gallery.add_item(media=image_url)
             box.add_item(gallery)
         self.add_item(box)
 
@@ -243,20 +285,11 @@ class FieldModal(discord.ui.Modal):
 
     async def on_submit(self, interaction):
         value = self.input.value.strip()
-
-        if self.field == "gcash_image":
-            value = value or None
-            if value and not value.startswith(("http://", "https://")):
-                await interaction.response.send_message(
-                    embed=embeds.error("that isn't a valid image link."), ephemeral=True
-                )
-                return
-        elif not value and self.required:
+        if not value and self.required:
             await interaction.response.send_message(
                 embed=embeds.error("that cannot be empty."), ephemeral=True
             )
             return
-
         self.panel.settings[self.field] = value
         save_config()
         await interaction.response.defer()
@@ -295,10 +328,12 @@ class SetupView(discord.ui.View):
             "",
             f"**confirm button** : {settings['confirm_button']}",
             f"**gcash button** : {settings['gcash_button']}",
-            f"**gcash qr** : {'set' if settings.get('gcash_image') else 'not set'}",
             "",
             "**confirm box preview**",
             preview[:800],
+            "",
+            "tip : start any button with an emoji like `:heart: confirm`, and paste "
+            "an image link inside the gcash text to show a qr under it.",
         ]
         return embeds.build("\n".join(lines)[:4096])
 
@@ -316,10 +351,6 @@ class SetupView(discord.ui.View):
         await interaction.response.send_modal(
             FieldModal(self, field, label, multiline=multiline, required=required, limit=limit)
         )
-
-    @discord.ui.button(label="intro", style=discord.ButtonStyle.secondary, row=0)
-    async def intro(self, interaction, button):
-        await self.edit(interaction, "intro", "intro line", multiline=True, required=False)
 
     @discord.ui.button(label="confirm format", style=discord.ButtonStyle.secondary, row=0)
     async def confirm_format(self, interaction, button):
@@ -343,11 +374,7 @@ class SetupView(discord.ui.View):
 
     @discord.ui.button(label="gcash text", style=discord.ButtonStyle.secondary, row=2)
     async def gcash_text(self, interaction, button):
-        await self.edit(interaction, "gcash_text", "gcash text", multiline=True)
-
-    @discord.ui.button(label="gcash qr", style=discord.ButtonStyle.secondary, row=2)
-    async def gcash_qr(self, interaction, button):
-        await self.edit(interaction, "gcash_image", "gcash qr image link", required=False, limit=URL_LIMIT)
+        await self.edit(interaction, "gcash_text", "gcash text (+ image link for qr)", multiline=True)
 
 
 class Confirmation(commands.Cog):
