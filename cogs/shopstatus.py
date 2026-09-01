@@ -156,18 +156,20 @@ async def post_state(guild, settings, state):
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel is None:
         return False
-    allowed = discord.AllowedMentions(everyone=False, roles=True, users=True)
     try:
         if settings.get("use_embed", True):
             await channel.send(
                 embed=state_embed(guild, settings, state),
-                allowed_mentions=allowed,
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True),
             )
         else:
             body = render(settings[FORMAT_KEYS[state]], guild, settings)[:2000]
             if not body:
                 return False
-            await channel.send(content=body, allowed_mentions=allowed)
+            await channel.send(
+                content=body,
+                allowed_mentions=discord.AllowedMentions.all(),
+            )
         return True
     except (discord.Forbidden, discord.HTTPException):
         return False
