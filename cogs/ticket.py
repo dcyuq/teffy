@@ -91,6 +91,7 @@ DEFAULT_PANEL = {
     "channel_id": None,
     "message_id": None,
     "mode": "embed_title",
+    "layout": "buttons",
     "title": "Support Tickets",
     "description": "Click a button below to open a private ticket.",
     "color": embeds.ACCENT.value,
@@ -336,6 +337,7 @@ def ensure_config(guild_id):
     settings.setdefault("counter", 0)
     settings.setdefault("staff_role_ids", [])
     settings["panel"].setdefault("mode", "embed_title")
+    settings["panel"].setdefault("layout", "buttons")
 
     legacy = settings.pop("staff_role_id", None)
     if legacy and legacy not in settings["staff_role_ids"]:
@@ -423,7 +425,10 @@ def clean_url(text):
     return None
 
 def build_panel_view(guild_id, settings):
-    if panel_mode(settings["panel"]) == "bare":
+    panel = settings["panel"]
+    if panel.get("layout") == "dropdown":
+        return DropdownPanelView(guild_id, settings["buttons"])
+    if panel_mode(panel) == "bare":
         return BarePanelView(guild_id, settings["buttons"])
     return PanelView(guild_id, settings["buttons"])
 
@@ -962,6 +967,54 @@ class BarePanelView(discord.ui.LayoutView):
             row.add_item(TicketOpenButton(guild_id, button_data))
         self.add_item(row)
 
+class TicketSelect(discord.ui.Select):
+    def __init__(self, guild_id, buttons):
+        options = [
+            discord.SelectOption(
+                label=button_data["label"][:100],
+                value=button_data["key"],
+                emoji=icon_partial(button_data.get("emoji")),
+            )
+            for button_data in buttons[:25]
+        ]
+        super().__init__(
+            placeholder="open a ticket",
+            custom_id=f"ticket:select:{guild_id}",
+            min_values=1,
+            max_values=1,
+            options=options or [discord.SelectOption(label="none", value="none")],
+            disabled=not options,
+        )
+
+    async def callback(self, interaction):
+        settings = get_config(interaction.guild.id)
+        if not is_configured(settings):
+            await interaction.response.send_message(
+                embed=embeds.error("the ticket system isn't finished being set up."), ephemeral=True
+            )
+            return
+
+        button_data = find_button(settings, self.values[0])
+        if button_data is None:
+            await interaction.response.send_message(
+                embed=embeds.error("that option is no longer configured."), ephemeral=True
+            )
+            return
+
+        if button_data.get("questions"):
+            await interaction.response.send_modal(TicketQuestionModal(button_data))
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await create_ticket(interaction, button_data, [])
+
+
+class DropdownPanelView(discord.ui.View):
+    def __init__(self, guild_id, buttons):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect(guild_id, buttons))
+
+
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1278,13 +1331,27 @@ class AppearanceView(discord.ui.View):
             "text": "Only the description is used, as plain message text.",
             "bare": "Nothing but buttons. Text, colour and images are ignored.",
         }
-        return f"**{panel_mode_label(self.builder.settings['panel'])}** - {notes[mode]}"
+        layout = self.builder.settings["panel"].get("layout", "buttons")
+        pick = "a dropdown menu" if layout == "dropdown" else "buttons"
+        return (
+            f"**{panel_mode_label(self.builder.settings['panel'])}** - {notes[mode]}\n"
+            f"options show as **{pick}**"
+        )
 
     @discord.ui.button(label="Edit Text & Images", style=discord.ButtonStyle.secondary, row=1)
     async def edit_text(self, interaction, button):
         await interaction.response.send_modal(
             EmbedEditModal(self.builder.settings, self.builder)
         )
+
+    @discord.ui.button(label="Buttons / Dropdown", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_layout(self, interaction, button):
+        panel = self.builder.settings["panel"]
+        panel["layout"] = "buttons" if panel.get("layout", "buttons") == "dropdown" else "dropdown"
+        save_config()
+        refreshed = AppearanceView(self.builder)
+        await interaction.response.edit_message(content=refreshed.blurb(), view=refreshed)
+        await self.builder.refresh()
 
 class SettingsView(discord.ui.View):
     def __init__(self, builder):
