@@ -44,7 +44,7 @@ DEFAULT_GCASH_TEXT = (
     "> no receipt = no transaction"
 )
 
-PING_PREFIX = "          one last check,   :c_heart:    "
+DEFAULT_PING = "one last check, :c_heart: {user}"
 
 SAMPLE_ORDER = {
     "item": "pinned post",
@@ -84,6 +84,7 @@ def save_config():
 
 def defaults():
     return {
+        "ping": DEFAULT_PING,
         "confirm_format": DEFAULT_CONFIRM_FORMAT,
         "footer": DEFAULT_FOOTER,
         "confirm_button": DEFAULT_CONFIRM_BUTTON,
@@ -184,8 +185,9 @@ class ConfirmView(discord.ui.LayoutView):
 
     def build(self):
         self.clear_items()
-        prefix = emojiutils.resolve_names(PING_PREFIX, self.guild)
-        self.add_item(discord.ui.TextDisplay(f"{prefix} <@{self.author_id}>"))
+        ping = render(self.settings.get("ping") or "", self.order, self.author_id, self.guild).strip()
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping[:2000]))
 
         box = discord.ui.Container()
         box.add_item(discord.ui.TextDisplay(
@@ -354,6 +356,10 @@ class SetupView(discord.ui.View):
         await interaction.response.send_modal(
             FieldModal(self, field, label, multiline=multiline, required=required, limit=limit)
         )
+
+    @discord.ui.button(label="ping", style=discord.ButtonStyle.secondary, row=0)
+    async def ping(self, interaction, button):
+        await self.edit(interaction, "ping", "ping line (use {user})", required=False, limit=200)
 
     @discord.ui.button(label="confirm format", style=discord.ButtonStyle.secondary, row=0)
     async def confirm_format(self, interaction, button):
