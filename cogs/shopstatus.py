@@ -74,6 +74,7 @@ def defaults():
         "closed_format": DEFAULT_CLOSED_FORMAT,
         "hiatus_format": DEFAULT_HIATUS_FORMAT,
         "use_embed": True,
+        "last_message_id": None,
         "state": None,
     }
 
@@ -158,7 +159,7 @@ async def post_state(guild, settings, state):
         return False
     try:
         if settings.get("use_embed", True):
-            await channel.send(
+            sent = await channel.send(
                 embed=state_embed(guild, settings, state),
                 allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True),
             )
@@ -166,13 +167,20 @@ async def post_state(guild, settings, state):
             body = render(settings[FORMAT_KEYS[state]], guild, settings)[:2000]
             if not body:
                 return False
-            await channel.send(
+            sent = await channel.send(
                 content=body,
                 allowed_mentions=discord.AllowedMentions.all(),
             )
-        return True
     except (discord.Forbidden, discord.HTTPException):
         return False
+    old_id = settings.get("last_message_id")
+    if old_id and old_id != sent.id:
+        try:
+            await channel.get_partial_message(old_id).delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+    settings["last_message_id"] = sent.id
+    return True
 
 
 async def sync_state(guild, force=False):
