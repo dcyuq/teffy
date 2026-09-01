@@ -73,6 +73,7 @@ def defaults():
         "open_format": DEFAULT_OPEN_FORMAT,
         "closed_format": DEFAULT_CLOSED_FORMAT,
         "hiatus_format": DEFAULT_HIATUS_FORMAT,
+        "use_embed": True,
         "state": None,
     }
 
@@ -155,11 +156,18 @@ async def post_state(guild, settings, state):
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel is None:
         return False
+    allowed = discord.AllowedMentions(everyone=False, roles=True, users=True)
     try:
-        await channel.send(
-            embed=state_embed(guild, settings, state),
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True),
-        )
+        if settings.get("use_embed", True):
+            await channel.send(
+                embed=state_embed(guild, settings, state),
+                allowed_mentions=allowed,
+            )
+        else:
+            body = render(settings[FORMAT_KEYS[state]], guild, settings)[:2000]
+            if not body:
+                return False
+            await channel.send(content=body, allowed_mentions=allowed)
         return True
     except (discord.Forbidden, discord.HTTPException):
         return False
@@ -276,6 +284,7 @@ class SetupView(discord.ui.View):
             f"**now** : {now_label}",
             f"**channel** : {channel.mention if channel else 'not set'}",
             f"**opens** : {settings['open_time']}    **closes** : {settings['close_time']}",
+            f"**output** : {'embed' if settings.get('use_embed', True) else 'raw text'}",
             "",
             f"**preview ({STATE_LABELS[preview_state]})**",
             preview,
@@ -314,6 +323,12 @@ class SetupView(discord.ui.View):
     @discord.ui.button(label="hiatus format", style=discord.ButtonStyle.secondary, row=1)
     async def hiatus_format(self, interaction, button):
         await interaction.response.send_modal(FormatModal(self, "hiatus"))
+
+    @discord.ui.button(label="embed / text", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_output(self, interaction, button):
+        self.settings["use_embed"] = not self.settings.get("use_embed", True)
+        save_config()
+        await self.refresh(interaction)
 
     @discord.ui.button(label="open time", style=discord.ButtonStyle.secondary, row=2)
     async def open_time(self, interaction, button):
