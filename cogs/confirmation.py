@@ -44,6 +44,8 @@ DEFAULT_GCASH_TEXT = (
     "> no receipt = no transaction"
 )
 
+PING_PREFIX = ":c_heart~1:"
+
 SAMPLE_ORDER = {
     "item": "pinned post",
     "price": "₱250.00",
@@ -182,7 +184,8 @@ class ConfirmView(discord.ui.LayoutView):
 
     def build(self):
         self.clear_items()
-        self.add_item(discord.ui.TextDisplay(f"<@{self.author_id}>"))
+        prefix = emojiutils.resolve_names(PING_PREFIX, self.guild)
+        self.add_item(discord.ui.TextDisplay(f"{prefix} <@{self.author_id}>"))
 
         box = discord.ui.Container()
         box.add_item(discord.ui.TextDisplay(
