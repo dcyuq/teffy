@@ -200,14 +200,6 @@ class ConfirmView(discord.ui.LayoutView):
         box.add_item(ConfirmRow(self, self.settings.get("confirm_button"), self.guild))
         self.add_item(box)
 
-    async def interaction_check(self, interaction):
-        if interaction.user.id == self.author_id:
-            return True
-        await interaction.response.send_message(
-            embed=embeds.error("this confirmation isn't yours."), ephemeral=True
-        )
-        return False
-
     async def confirm(self, interaction):
         view = PaymentView(self.settings, self.order, self.author_id, interaction.guild)
         await interaction.response.edit_message(view=view)
@@ -242,14 +234,6 @@ class PaymentView(discord.ui.LayoutView):
         box.add_item(discord.ui.Separator())
         box.add_item(GcashRow(self, self.settings.get("gcash_button"), self.guild))
         self.add_item(box)
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id == self.author_id:
-            return True
-        await interaction.response.send_message(
-            embed=embeds.error("this confirmation isn't yours."), ephemeral=True
-        )
-        return False
 
     async def pay(self, interaction):
         view = GcashBox(self.settings, self.order, self.author_id, interaction.guild)
