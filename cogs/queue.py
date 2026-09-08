@@ -434,20 +434,44 @@ class StatusSelect(discord.ui.Select):
         order["updated_by"] = interaction.user.id
         save_orders()
 
+        ping, body = queue_payload(interaction.guild, settings, order)
         await interaction.response.edit_message(
-            content=order_text(interaction.guild, settings, order),
+            content=None,
             embed=None,
-            view=QueueView(settings, chosen),
+            view=QueueView(settings, chosen, ping, body),
         )
 
         await send_completed(interaction.guild, settings, order)
         schedule_rename(interaction.guild, settings, order)
 
-class QueueView(discord.ui.View):
-
+class QueueControls(discord.ui.ActionRow):
     def __init__(self, settings, current=None):
-        super().__init__(timeout=None)
+        super().__init__()
         self.add_item(StatusSelect(settings, current))
+
+class QueueView(discord.ui.LayoutView):
+
+    def __init__(self, settings, current=None, ping=None, body=None):
+        super().__init__(timeout=None)
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping))
+        if body:
+            container = discord.ui.Container()
+            text, image_url = split_image(body)
+            if text:
+                container.add_item(discord.ui.TextDisplay(text[:4000]))
+            if image_url:
+                container.add_item(
+                    discord.ui.MediaGallery(discord.MediaGalleryItem(image_url))
+                )
+            self.add_item(container)
+        self.add_item(QueueControls(settings, current))
+
+def queue_payload(guild, settings, order):
+    body = order_text(guild, settings, order)
+    mention = f"<@{order['user_id']}>"
+    ping = mention if settings.get("ping", True) else None
+    return ping, body
 
 class TemplateModal(discord.ui.Modal, title="Queue Format"):
     def __init__(self, builder):
@@ -1187,13 +1211,13 @@ class ConfirmView(discord.ui.View):
         ping = self.settings.get("ping", True)
 
         try:
-            body = order_text(interaction.guild, self.settings, self.order)
-            mention = f"<@{self.order['user_id']}>"
-            if ping and mention not in body:
-                body = f"{mention}\n{body}"[:2000]
+            mention, body = queue_payload(
+                interaction.guild, self.settings, self.order
+            )
             sent = await channel.send(
-                content=body,
-                view=QueueView(self.settings, self.order["status"]),
+                view=QueueView(
+                    self.settings, self.order["status"], mention, body
+                ),
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=ping
                 ),
@@ -1413,10 +1437,11 @@ class Queue(commands.Cog):
         channel = ctx.guild.get_channel(settings.get("channel_id")) or ctx.channel
         try:
             target = await channel.fetch_message(int(raw))
+            ping, body = queue_payload(ctx.guild, settings, order)
             await target.edit(
-                content=order_text(ctx.guild, settings, order),
+                content=None,
                 embed=None,
-                view=QueueView(settings, entry["key"]),
+                view=QueueView(settings, entry["key"], ping, body),
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
