@@ -187,22 +187,52 @@ DIGIT_WORDS = {
     "FIVE": "5", "SIX": "6", "SEVEN": "7", "EIGHT": "8", "NINE": "9",
 }
 
+LOOKALIKE = {
+    "\u1950": "t", "\u1952": "n", "\u1953": "c", "\u1955": "d",
+    "\u1957": "p", "\u195b": "s", "\u195d": "h", "\u1960": "l",
+    "\u1963": "w", "\u1968": "y", "\u1969": "u", "\u196a": "v",
+    "\u1970": "l", "\u1972": "e", "\u1973": "o", "\u1974": "c",
+    "\u1954": "s", "\u1961": "c",
+    "\u1a00": "o", "\u1a05": "d", "\u1a08": "n", "\u1a14": "s",
+    "\u1962": "f", "\u183b": "f",
+    "\u19b2": "a", "\u19b4": "e", "\u19b5": "u", "\u19b6": "o",
+    "\u1990": "n", "\u1991": "s", "\u1992": "m", "\u1993": "n",
+    "\u1994": "d", "\u1996": "a", "\u199d": "w", "\u199c": "v",
+    "\u19ae": "o", "\u19ac": "y", "\u19ee": "e", "\uaa8e": "s",
+    "\uaa80": "n",
+    "\uaa91": "m", "\uaa8a": "u", "\uaa96": "a", "\uaa9d": "w",
+    "\uaa9c": "v", "\uaaae": "o", "\uaaac": "y", "\uaac0": "e",
+    "\uaabb": "t", "\uaab6": "o", "\u1d0f": "o", "\u0261": "g",
+}
+
+NAME_LETTER = re.compile(r"\bLETTER ([A-Z])\b")
+
 def fold_char(ch):
     if ch.isascii():
         return ch
+
+    swap = LOOKALIKE.get(ch)
+    if swap:
+        return swap
 
     plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
     if plain:
         return plain
 
     try:
-        parts = unicodedata.name(ch).split()
+        name = unicodedata.name(ch)
     except ValueError:
         return ""
 
+    parts = name.split()
     tail = parts[-1]
     if len(tail) == 1 and tail.isalpha():
         return tail.lower() if "SMALL" in parts else tail
+
+    found = NAME_LETTER.search(name)
+    if found:
+        return found.group(1).lower() if "SMALL" in parts else found.group(1)
+
     if "DIGIT" in parts and tail in DIGIT_WORDS:
         return DIGIT_WORDS[tail]
     return ""
