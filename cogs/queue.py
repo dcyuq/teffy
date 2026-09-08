@@ -182,13 +182,33 @@ def in_menu(entry):
 def menu_statuses(settings):
     return [s for s in statuses_of(settings) if in_menu(s)][:MENU_LIMIT]
 
+DIGIT_WORDS = {
+    "ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3", "FOUR": "4",
+    "FIVE": "5", "SIX": "6", "SEVEN": "7", "EIGHT": "8", "NINE": "9",
+}
+
+def fold_char(ch):
+    if ch.isascii():
+        return ch
+
+    plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+    if plain:
+        return plain
+
+    try:
+        parts = unicodedata.name(ch).split()
+    except ValueError:
+        return ""
+
+    tail = parts[-1]
+    if len(tail) == 1 and tail.isalpha():
+        return tail.lower() if "SMALL" in parts else tail
+    if "DIGIT" in parts and tail in DIGIT_WORDS:
+        return DIGIT_WORDS[tail]
+    return ""
+
 def fold(text):
-    out = []
-    for ch in text or "":
-        if not ch.isascii():
-            ch = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
-        out.append(ch)
-    return "".join(out)
+    return "".join(fold_char(ch) for ch in text or "")
 
 def slug(text, taken):
     base = re.sub(r"[^a-z0-9]+", "-", fold(text).strip().lower()).strip("-")
@@ -219,22 +239,25 @@ def valid_link(url):
         ("http://", "https://", "discord://")
     )
 
-def add_link(view, label, emoji, url):
-    if not url:
-        return
-    label = (label or "").strip() or None
-    partial = emojiutils.to_partial(emoji)
-    if label is None and partial is None:
-        return
-    view.add_item(discord.ui.Button(url=url, label=label, emoji=partial))
+def link_row(*specs):
+    row = discord.ui.ActionRow()
+    for label, emoji, url in specs:
+        if not url:
+            continue
+        label = (label or "").strip() or None
+        partial = emojiutils.to_partial(emoji)
+        if label is None and partial is None:
+            continue
+        row.add_item(discord.ui.Button(url=url, label=label, emoji=partial))
+    return row
 
-def notify_view(settings, jump_url):
-    view = discord.ui.View(timeout=None)
-    add_link(view, settings.get("notify_jump_label", "view order"),
-             settings.get("notify_jump_emoji"), jump_url)
-    add_link(view, settings.get("notify_link_label"),
-             settings.get("notify_link_emoji"), settings.get("notify_link_url"))
-    return view if view.children else None
+def notify_row(settings, jump_url):
+    return link_row(
+        (settings.get("notify_jump_label", "view order"),
+         settings.get("notify_jump_emoji"), jump_url),
+        (settings.get("notify_link_label"),
+         settings.get("notify_link_emoji"), settings.get("notify_link_url")),
+    )
 
 def stamp_values(guild, order):
     stamp = int(order.get("created_at") or 0)
@@ -338,11 +361,11 @@ def schedule_rename(guild, settings, order):
     _rename_tasks.add(task)
     task.add_done_callback(_rename_tasks.discard)
 
-def completed_view(settings):
-    view = discord.ui.View(timeout=None)
-    add_link(view, settings.get("vouch_label", "vouch"),
-             settings.get("vouch_emoji"), settings.get("vouch_url"))
-    return view if view.children else None
+def completed_row(settings):
+    return link_row(
+        (settings.get("vouch_label", "vouch"),
+         settings.get("vouch_emoji"), settings.get("vouch_url")),
+    )
 
 async def send_completed(guild, settings, order):
     if order.get("completed_sent"):
@@ -360,10 +383,10 @@ async def send_completed(guild, settings, order):
     ).strip()
     if not text:
         return
+    ping = f"<@{order['user_id']}>" if settings.get("ping", True) else None
     try:
         await channel.send(
-            content=text[:2000],
-            view=completed_view(settings),
+            view=CardView(ping, text, completed_row(settings)),
             allowed_mentions=discord.AllowedMentions(
                 everyone=False, roles=False, users=settings.get("ping", True)
             ),
@@ -432,6 +455,8 @@ class StatusSelect(discord.ui.Select):
 
         order["status"] = chosen
         order["updated_by"] = interaction.user.id
+        if chosen != (settings.get("completed_status") or "done"):
+            order["completed_sent"] = False
         save_orders()
 
         ping, body = queue_payload(interaction.guild, settings, order)
@@ -443,6 +468,23 @@ class StatusSelect(discord.ui.Select):
 
         await send_completed(interaction.guild, settings, order)
         schedule_rename(interaction.guild, settings, order)
+
+class CardView(discord.ui.LayoutView):
+    def __init__(self, ping, body, row=None):
+        super().__init__(timeout=None)
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping))
+        container = discord.ui.Container()
+        text, image_url = split_image(body)
+        if text:
+            container.add_item(discord.ui.TextDisplay(text[:4000]))
+        if image_url:
+            container.add_item(
+                discord.ui.MediaGallery(discord.MediaGalleryItem(image_url))
+            )
+        self.add_item(container)
+        if row is not None and row.children:
+            self.add_item(row)
 
 class QueueControls(discord.ui.ActionRow):
     def __init__(self, settings, current=None):
@@ -468,10 +510,7 @@ class QueueView(discord.ui.LayoutView):
         self.add_item(QueueControls(settings, current))
 
 def queue_payload(guild, settings, order):
-    body = order_text(guild, settings, order)
-    mention = f"<@{order['user_id']}>"
-    ping = mention if settings.get("ping", True) else None
-    return ping, body
+    return None, order_text(guild, settings, order)
 
 class TemplateModal(discord.ui.Modal, title="Queue Format"):
     def __init__(self, builder):
@@ -1249,8 +1288,11 @@ class ConfirmView(discord.ui.View):
         if notify:
             try:
                 await self.ctx.channel.send(
-                    content=notify[:2000],
-                    view=notify_view(self.settings, sent.jump_url),
+                    view=CardView(
+                        f"<@{self.order['user_id']}>" if ping else None,
+                        notify,
+                        notify_row(self.settings, sent.jump_url),
+                    ),
                     allowed_mentions=discord.AllowedMentions(
                         everyone=False, roles=False, users=ping
                     ),
@@ -1432,6 +1474,8 @@ class Queue(commands.Cog):
 
         order["status"] = entry["key"]
         order["updated_by"] = ctx.author.id
+        if entry["key"] != (settings.get("completed_status") or "done"):
+            order["completed_sent"] = False
         save_orders()
 
         channel = ctx.guild.get_channel(settings.get("channel_id")) or ctx.channel
