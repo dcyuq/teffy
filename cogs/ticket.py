@@ -29,6 +29,7 @@ CATEGORY_LIMIT = 50
 MAX_BUTTONS = 10
 MAX_QUESTIONS = 5
 MAX_STAFF_ROLES = 10
+MAX_OPEN_PER_USER = 5
 
 STYLES = {
     "primary": discord.ButtonStyle.secondary,
@@ -388,11 +389,12 @@ def find_button(settings, key):
             return entry
     return None
 
-def open_ticket_for(guild_id, user_id):
-    for channel_id, data in tickets.items():
-        if data["guild_id"] == guild_id and data["opener_id"] == user_id:
-            return channel_id
-    return None
+def open_tickets_for(guild_id, user_id):
+    return [
+        channel_id
+        for channel_id, data in tickets.items()
+        if data["guild_id"] == guild_id and data["opener_id"] == user_id
+    ]
 
 def duration_text(seconds):
     seconds = int(seconds)
@@ -473,18 +475,20 @@ async def create_ticket(interaction, button_data, answers):
     guild = interaction.guild
     settings = get_config(guild.id)
 
-    existing = open_ticket_for(guild.id, interaction.user.id)
-    if existing is not None:
-        channel = guild.get_channel(existing)
-        if channel is not None:
-            await interaction.followup.send(
-                embed=embeds.error(f"you already have an open ticket: {channel.mention}"),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        tickets.pop(existing, None)
+    owned = open_tickets_for(guild.id, interaction.user.id)
+    live = [c for c in owned if guild.get_channel(c) is not None]
+    if len(live) != len(owned):
+        for stale in owned:
+            if stale not in live:
+                tickets.pop(stale, None)
         save_tickets()
+    if len(live) >= MAX_OPEN_PER_USER:
+        await interaction.followup.send(
+            embed=embeds.error(f"you already have {MAX_OPEN_PER_USER} open tickets. close one before opening another."),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
 
     category_id = button_data.get("category_id") or settings["category_id"]
     category = guild.get_channel(category_id)
@@ -558,21 +562,18 @@ async def create_ticket(interaction, button_data, answers):
     }
     save_tickets()
 
-    embed = discord.Embed(
-        title=f"Ticket {number:04d} - {button_data['label']}",
-        description=button_data.get("welcome") or DEFAULT_BUTTON["welcome"],
-        color=settings["panel"]["color"],
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.add_field(name="Opened By", value=interaction.user.mention, inline=False)
-    for question, answer in answers:
-        embed.add_field(name=question[:256], value=(answer or "-")[:1024], inline=False)
+    welcome = button_data.get("welcome") or DEFAULT_BUTTON["welcome"]
+    heading = f"### Ticket {number:04d} - {button_data['label']}"
+    detail = "\n\n".join(
+        f"**{question[:256]}**\n{(answer or '-')[:1024]}" for question, answer in answers
+    ) or None
 
     mentions = " ".join(r.mention for r in roles)
+    ping = f"{interaction.user.mention} {mentions}".strip()
     await channel.send(
-        content=f"{interaction.user.mention} {mentions}".strip(),
-        embed=embed,
-        view=TicketControlView(),
+        view=TicketControlView(
+            ping, heading, welcome, detail, settings["panel"]["color"]
+        ),
         allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
     )
 
@@ -1017,10 +1018,7 @@ class DropdownPanelView(discord.ui.View):
         self.add_item(TicketSelect(guild_id, buttons, placeholder))
 
 
-class TicketControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
+class TicketControls(discord.ui.ActionRow):
     @discord.ui.button(
         label="Claim", style=discord.ButtonStyle.secondary, custom_id="ticket:claim"
     )
@@ -1095,6 +1093,30 @@ class TicketControlView(discord.ui.View):
         await interaction.response.send_modal(
             CloseReasonModal(data, interaction.channel)
         )
+
+class TicketControlView(discord.ui.LayoutView):
+    def __init__(self, ping=None, heading=None, body=None, detail=None, color=None):
+        super().__init__(timeout=None)
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping))
+
+        container = discord.ui.Container(
+            accent_colour=discord.Colour(color) if color else None
+        )
+        if heading:
+            container.add_item(discord.ui.TextDisplay(heading))
+            container.add_item(discord.ui.Separator())
+        if body:
+            container.add_item(discord.ui.TextDisplay(body))
+        if detail:
+            container.add_item(
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.large, visible=False)
+            )
+            container.add_item(discord.ui.TextDisplay(detail))
+        if heading or body or detail:
+            self.add_item(container)
+
+        self.add_item(TicketControls())
 
 class EmbedEditModal(discord.ui.Modal, title="Panel Appearance"):
     def __init__(self, settings, builder):
@@ -1468,12 +1490,35 @@ class StyleSelect(discord.ui.Select):
         )
         await self.builder.refresh()
 
+class ButtonCategorySelect(discord.ui.ChannelSelect):
+    def __init__(self, builder, button_data):
+        self.builder = builder
+        self.button_data = button_data
+        super().__init__(
+            channel_types=[discord.ChannelType.category],
+            placeholder="Category for this button (blank = default)",
+            min_values=0,
+            max_values=1,
+            row=1,
+        )
+
+    async def callback(self, interaction):
+        self.button_data["category_id"] = self.values[0].id if self.values else None
+        save_config()
+
+        refreshed = ButtonManageView(self.builder, self.button_data)
+        await interaction.response.edit_message(
+            embed=refreshed.summary(), view=refreshed
+        )
+        await self.builder.refresh()
+
 class ButtonManageView(discord.ui.View):
     def __init__(self, builder, button_data):
         super().__init__(timeout=300)
         self.builder = builder
         self.button_data = button_data
         self.add_item(StyleSelect(builder, button_data))
+        self.add_item(ButtonCategorySelect(builder, button_data))
 
     async def interaction_check(self, interaction):
         return interaction.user.id == self.builder.ctx.author.id
@@ -1490,29 +1535,34 @@ class ButtonManageView(discord.ui.View):
             mode = "Opens a ticket immediately"
             listed = "No questions set."
 
+        override = self.button_data.get("category_id")
+        category = self.builder.ctx.guild.get_channel(override) if override else None
+        category_text = category.name if category else "default category"
+
         return discord.Embed(
             title=f"Button: {self.button_data['label']}",
             description=(
                 f"**Icon** - {icon_text(self.button_data)}\n"
                 f"**Colour** - {style_label(self.button_data.get('style'))}\n"
+                f"**Category** - {category_text}\n"
                 f"**Behaviour** - {mode}\n\n"
                 f"{listed}"
             ),
         )
 
-    @discord.ui.button(label="Edit Details", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Edit Details", style=discord.ButtonStyle.secondary, row=2)
     async def edit_details(self, interaction, button):
         await interaction.response.send_modal(
             ButtonEditModal(self.builder.settings, self.builder, self.button_data)
         )
 
-    @discord.ui.button(label="Set Questions", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Set Questions", style=discord.ButtonStyle.secondary, row=2)
     async def set_questions(self, interaction, button):
         await interaction.response.send_modal(
             QuestionsModal(self.builder, self.button_data)
         )
 
-    @discord.ui.button(label="Open Instantly", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Open Instantly", style=discord.ButtonStyle.secondary, row=2)
     async def clear_questions(self, interaction, button):
         await interaction.response.defer()
         self.button_data["questions"] = []
@@ -1523,7 +1573,7 @@ class ButtonManageView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Delete Button", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Delete Button", style=discord.ButtonStyle.secondary, row=3)
     async def delete_button(self, interaction, button):
         await interaction.response.defer()
         if self.button_data in self.builder.settings["buttons"]:
@@ -1645,7 +1695,10 @@ class BuilderView(discord.ui.View):
                 colour = style_label(entry.get("style"))
                 icon = entry.get("emoji")
                 shown = f"{icon} {entry['label']}" if icon else entry["label"]
-                lines.append(f"- {shown} ({colour}, {mode})")
+                override = entry.get("category_id")
+                cat = guild.get_channel(override) if override else None
+                where = cat.name if cat else "default"
+                lines.append(f"- {shown} ({colour}, {mode}, {where})")
         else:
             lines.append("")
             lines.append("**Buttons** - none yet, add one before publishing")
