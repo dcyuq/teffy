@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 import time
+import unicodedata
 import uuid
 
 import discord
@@ -28,8 +29,8 @@ MAX_STATUSES = 8
 MENU_LIMIT = 25
 TEMPLATE_LIMIT = 3800
 
-PAD = "\u3164"
-JOINER = "\u2060"
+PAD = "ㅤ"
+JOINER = "⁠"
 
 DEFAULT_TEMPLATE = (
     "order for {user}\n"
@@ -181,8 +182,16 @@ def in_menu(entry):
 def menu_statuses(settings):
     return [s for s in statuses_of(settings) if in_menu(s)][:MENU_LIMIT]
 
+def fold(text):
+    out = []
+    for ch in text or "":
+        if not ch.isascii():
+            ch = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+        out.append(ch)
+    return "".join(out)
+
 def slug(text, taken):
-    base = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    base = re.sub(r"[^a-z0-9]+", "-", fold(text).strip().lower()).strip("-")
     base = base[:20] or uuid.uuid4().hex[:6]
     candidate, n = base, 2
     while candidate in taken:
@@ -292,7 +301,7 @@ def order_text(guild, settings, order):
         if member:
             body = f"{body}\n-# last updated by {member.display_name}"
     body = body.strip()
-    return body[:2000] if body else "\u200b"
+    return body[:2000] if body else "​"
 
 def can_update(member, order):
     return (
@@ -301,8 +310,7 @@ def can_update(member, order):
     )
 
 def channel_name_for(status_text, opener):
-    raw = f"{status_text}-{opener}"
-    name = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    name = re.sub(r"[^a-z0-9]+", "-", fold(f"{status_text}-{opener}").lower()).strip("-")
     return name[:100] or "ticket"
 
 async def rename_source(guild, settings, order):
