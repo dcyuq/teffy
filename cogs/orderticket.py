@@ -4,8 +4,8 @@ import uuid
 import discord
 from discord.ext import commands
 
-import ticket
-import confirmation
+import cogs.ticket as ticket
+import cogs.confirmation as confirmation
 
 log = logging.getLogger(__name__)
 
@@ -552,7 +552,7 @@ confirmation.SetupView.status_embed = status_embed
 
 
 class OrderConfirmButton(discord.ui.Button):
-    def __init__(self, order, author_id, settings):
+    def __init__(self, order, author_id, settings, guild):
         super().__init__(
             label="confirm",
             style=discord.ButtonStyle.secondary,
@@ -565,7 +565,7 @@ class OrderConfirmButton(discord.ui.Button):
         confirmation.apply_label(
             self,
             settings.get("confirm_button"),
-            None,
+            guild,
             "confirm order",
         )
 
@@ -639,7 +639,8 @@ class PaymentMethodButton(discord.ui.Button):
 
         await interaction.response.send_message(
             content=rendered[:2000],
-            ephemeral=True,
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
@@ -653,62 +654,40 @@ def settings_gcash_text(settings, order, author_id, guild):
     )
 
 
-class PaymentMethodView(discord.ui.View):
+class PaymentMethodView(discord.ui.LayoutView):
     def __init__(self, settings, order, author_id, methods):
         super().__init__(timeout=300)
 
-        for method in methods[:25]:
-            self.add_item(
-                PaymentMethodButton(
-                    settings,
-                    order,
-                    author_id,
-                    method,
+        methods = methods[:25]
+
+        if not methods:
+            return
+
+        for start in range(0, len(methods), 5):
+            row = discord.ui.ActionRow()
+            for method in methods[start:start + 5]:
+                row.add_item(
+                    PaymentMethodButton(
+                        settings,
+                        order,
+                        author_id,
+                        method,
+                    )
                 )
-            )
+            self.add_item(row)
 
 
 class OrderTicketControls(discord.ui.ActionRow):
-    def __init__(self, order, author_id, settings):
+    def __init__(self, order, author_id, settings, guild):
         super().__init__()
 
-        self.original = ticket.TicketControls()
-
-        claim = discord.ui.Button(
-            label="Claim",
-            style=discord.ButtonStyle.secondary,
-            custom_id="ticket:claim",
-        )
-        close = discord.ui.Button(
-            label="Close",
-            style=discord.ButtonStyle.secondary,
-            custom_id="ticket:close",
-        )
-        confirm = OrderConfirmButton(
-            order,
-            author_id,
-            settings,
-        )
-
-        claim.callback = self.claim_callback
-        close.callback = self.close_callback
-
-        self.add_item(claim)
-        self.add_item(close)
-        self.add_item(confirm)
-
-    async def claim_callback(self, interaction):
-        await ticket.TicketControls.claim.callback(
-            self.original,
-            interaction,
-            None,
-        )
-
-    async def close_callback(self, interaction):
-        await ticket.TicketControls.close.callback(
-            self.original,
-            interaction,
-            None,
+        self.add_item(
+            OrderConfirmButton(
+                order,
+                author_id,
+                settings,
+                guild,
+            )
         )
 
 
@@ -759,13 +738,16 @@ class FinalOrderTicketView(discord.ui.LayoutView):
 
         self.add_item(box)
 
-        self.add_item(
-            OrderTicketControls(
+        controls = ticket.TicketControls()
+        controls.add_item(
+            OrderConfirmButton(
                 order,
                 author_id,
                 settings,
+                guild,
             )
         )
+        self.add_item(controls)
 
 
 _original_create_ticket = ticket.create_ticket
