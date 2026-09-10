@@ -30,6 +30,7 @@ MAX_BUTTONS = 10
 MAX_QUESTIONS = 5
 MAX_STAFF_ROLES = 10
 MAX_OPEN_PER_USER = 5
+ORDER_OVERRIDE_CALLBACK = globals().get("ORDER_OVERRIDE_CALLBACK")
 
 STYLES = {
     "primary": discord.ButtonStyle.secondary,
@@ -923,6 +924,12 @@ class TicketQuestionModal(discord.ui.Modal):
         answers = [(label, field.value) for label, field in self.inputs]
         await create_ticket(interaction, self.button_data, answers)
 
+async def apply_order_override(interaction, button_data):
+    callback = ORDER_OVERRIDE_CALLBACK
+    if callback is None:
+        return False
+    return bool(await callback(interaction, button_data))
+
 class TicketOpenButton(discord.ui.Button):
     def __init__(self, guild_id, button_data):
         super().__init__(
@@ -946,6 +953,9 @@ class TicketOpenButton(discord.ui.Button):
             await interaction.response.send_message(
                 embed=embeds.error("this button is no longer configured."), ephemeral=True
             )
+            return
+
+        if await apply_order_override(interaction, button_data):
             return
 
         if button_data.get("questions"):
@@ -1018,6 +1028,10 @@ class TicketSelect(discord.ui.Select):
             await interaction.response.send_message(
                 embed=embeds.error("that option is no longer configured."), ephemeral=True
             )
+            await self.reset(interaction)
+            return
+
+        if await apply_order_override(interaction, button_data):
             await self.reset(interaction)
             return
 
@@ -1544,7 +1558,10 @@ class ButtonManageView(discord.ui.View):
 
     def summary(self):
         count = len(self.button_data.get("questions", []))
-        if count:
+        if self.button_data.get("order_enabled"):
+            mode = "Uses the confirmation order form"
+            listed = "Confirmation questions are shown before opening."
+        elif count:
             mode = f"Asks {count} question(s) before opening"
             listed = "\n".join(
                 f"{i + 1}. {q['label']}"
@@ -1613,9 +1630,13 @@ class ButtonPickSelect(discord.ui.Select):
                 value=b["key"],
                 emoji=icon_partial(b.get("emoji")),
                 description=(
+                    "Confirmation order form"
+                    if b.get("order_enabled")
+                    else (
                     f"{len(b.get('questions', []))} question(s)"
                     if b.get("questions")
                     else "Opens instantly"
+                    )
                 ),
             )
             for b in builder.settings["buttons"]
@@ -1710,7 +1731,10 @@ class BuilderView(discord.ui.View):
             lines.append("**Buttons**")
             for entry in settings["buttons"]:
                 count = len(entry.get("questions", []))
-                mode = f"asks {count}" if count else "instant"
+                if entry.get("order_enabled"):
+                    mode = "confirmation order"
+                else:
+                    mode = f"asks {count}" if count else "instant"
                 colour = style_label(entry.get("style"))
                 icon = entry.get("emoji")
                 shown = f"{icon} {entry['label']}" if icon else entry["label"]
