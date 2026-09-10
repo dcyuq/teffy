@@ -59,6 +59,7 @@ def default_settings():
 
 def settings_for(guild_id):
     key = str(guild_id)
+
     if key not in config:
         config[key] = default_settings()
 
@@ -804,6 +805,90 @@ async def order_override(interaction, button_data):
     return True
 
 
+def patch_ticket_callbacks():
+    open_button = ticket.TicketOpenButton
+    select_menu = ticket.TicketSelect
+
+    if getattr(
+        open_button,
+        "_order_override_patched",
+        False,
+    ):
+        return
+
+    original_open_callback = open_button.callback
+    original_select_callback = select_menu.callback
+
+    async def patched_open_callback(self, interaction):
+        settings = ticket.get_config(
+            interaction.guild.id
+        )
+
+        button_data = (
+            ticket.find_button(
+                settings,
+                self.button_key,
+            )
+            if settings
+            else None
+        )
+
+        if (
+            button_data is not None
+            and await order_override(
+                interaction,
+                button_data,
+            )
+        ):
+            return
+
+        await original_open_callback(
+            self,
+            interaction,
+        )
+
+    async def patched_select_callback(self, interaction):
+        settings = ticket.get_config(
+            interaction.guild.id
+        )
+
+        selected_key = (
+            self.values[0]
+            if self.values
+            else None
+        )
+
+        button_data = (
+            ticket.find_button(
+                settings,
+                selected_key,
+            )
+            if settings
+            else None
+        )
+
+        if (
+            button_data is not None
+            and await order_override(
+                interaction,
+                button_data,
+            )
+        ):
+            await self.reset(interaction)
+            return
+
+        await original_select_callback(
+            self,
+            interaction,
+        )
+
+    open_button.callback = patched_open_callback
+    select_menu.callback = patched_select_callback
+
+    open_button._order_override_patched = True
+    select_menu._order_override_patched = True
+
+
 def patch_confirmation_setup():
     setup_view = confirmation.SetupView
 
@@ -825,6 +910,7 @@ def patch_confirmation_setup():
 
 
 patch_confirmation_setup()
+patch_ticket_callbacks()
 
 for guild_id in list(config):
     sync_ticket_override(int(guild_id))
