@@ -31,6 +31,7 @@ MAX_QUESTIONS = 5
 MAX_STAFF_ROLES = 10
 MAX_OPEN_PER_USER = 5
 ORDER_OVERRIDE_CALLBACK = globals().get("ORDER_OVERRIDE_CALLBACK")
+TICKET_CREATED_CALLBACK = globals().get("TICKET_CREATED_CALLBACK")
 
 STYLES = {
     "primary": discord.ButtonStyle.secondary,
@@ -597,6 +598,13 @@ async def create_ticket(interaction, button_data, answers):
             name=question[:256], value=(answer or "-")[:1024], inline=False
         )
     await send_log(guild, log_embed)
+
+    callback = TICKET_CREATED_CALLBACK
+    if callback is not None:
+        try:
+            await callback(interaction, button_data, answers, channel)
+        except Exception:
+            log.exception("Ticket-created callback failed for %s", channel.id)
 
 def build_close_embed(guild, entry):
     opener = guild.get_member(entry["opener_id"])
