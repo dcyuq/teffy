@@ -334,7 +334,7 @@ def build_order_view(ping, heading, welcome, receipt, color, order, author_id, g
 
 class OrderButtonSelect(discord.ui.Select):
     def __init__(self, parent):
-        self.parent = parent
+        self.owner_view = parent
         settings = ticket.get_config(parent.ctx.guild.id) or {}
         buttons = settings.get("buttons", [])[:24]
         order_settings = settings_for(parent.ctx.guild.id)
@@ -368,19 +368,19 @@ class OrderButtonSelect(discord.ui.Select):
         save_config()
         await interaction.response.edit_message(
             embed=setup_status(interaction.guild.id),
-            view=OrderMenuView(self.parent),
+            view=OrderMenuView(self.owner_view),
         )
-        await self.parent.refresh()
+        await self.owner_view.refresh()
 
 
 class OrderButtonMenuView(discord.ui.View):
     def __init__(self, parent):
         super().__init__(timeout=300)
-        self.parent = parent
+        self.owner_view = parent
         self.add_item(OrderButtonSelect(parent))
 
     async def interaction_check(self, interaction):
-        if interaction.user.id == self.parent.ctx.author.id:
+        if interaction.user.id == self.owner_view.ctx.author.id:
             return True
         await interaction.response.send_message(
             embed=discord.Embed(description="this panel isn't yours."),
@@ -392,10 +392,10 @@ class OrderButtonMenuView(discord.ui.View):
 class OrderMenuView(discord.ui.View):
     def __init__(self, parent):
         super().__init__(timeout=300)
-        self.parent = parent
+        self.owner_view = parent
 
     async def interaction_check(self, interaction):
-        if interaction.user.id == self.parent.ctx.author.id:
+        if interaction.user.id == self.owner_view.ctx.author.id:
             return True
         await interaction.response.send_message(
             embed=discord.Embed(description="this panel isn't yours."),
@@ -407,24 +407,24 @@ class OrderMenuView(discord.ui.View):
     async def choose_button(self, interaction, button):
         await interaction.response.edit_message(
             embed=setup_status(interaction.guild.id),
-            view=OrderButtonMenuView(self.parent),
+            view=OrderButtonMenuView(self.owner_view),
         )
 
     @discord.ui.button(label="edit order form", style=discord.ButtonStyle.secondary)
     async def edit_form(self, interaction, button):
-        await interaction.response.send_modal(OrderFieldsModal(self.parent))
+        await interaction.response.send_modal(OrderFieldsModal(self.owner_view))
 
     @discord.ui.button(label="edit order receipt", style=discord.ButtonStyle.secondary)
     async def edit_receipt(self, interaction, button):
-        await interaction.response.send_modal(OrderReceiptModal(self.parent))
+        await interaction.response.send_modal(OrderReceiptModal(self.owner_view))
 
 
 class OrderFieldsModal(discord.ui.Modal):
     def __init__(self, parent):
         super().__init__(title="Edit order form labels")
-        self.parent = parent
+        self.owner_view = parent
         self.inputs = []
-        fields = settings_for(parent.ctx.guild.id)["fields"]
+        fields = settings_for(self.owner_view.ctx.guild.id)["fields"]
         for index, field in enumerate(fields):
             text_input = discord.ui.TextInput(
                 label=f"Field {index + 1} label",
@@ -443,14 +443,14 @@ class OrderFieldsModal(discord.ui.Modal):
             embed=discord.Embed(description="the order form labels were saved."),
             ephemeral=True,
         )
-        await self.parent.refresh()
+        await self.owner_view.refresh()
 
 
 class OrderReceiptModal(discord.ui.Modal):
     def __init__(self, parent):
         super().__init__(title="Edit order receipt")
-        self.parent = parent
-        settings = settings_for(parent.ctx.guild.id)
+        self.owner_view = parent
+        settings = settings_for(self.owner_view.ctx.guild.id)
         self.receipt = discord.ui.TextInput(
             label="Receipt format",
             default=settings["receipt_format"][:2000],
@@ -470,12 +470,12 @@ class OrderReceiptModal(discord.ui.Modal):
             ),
             ephemeral=True,
         )
-        await self.parent.refresh()
+        await self.owner_view.refresh()
 
 
 class OrderSetupButton(discord.ui.Button):
     def __init__(self, parent):
-        self.parent = parent
+        self.owner_view = parent
         super().__init__(
             label="order tickets",
             style=discord.ButtonStyle.secondary,
@@ -486,7 +486,7 @@ class OrderSetupButton(discord.ui.Button):
     async def callback(self, interaction):
         await interaction.response.send_message(
             embed=setup_status(interaction.guild.id),
-            view=OrderMenuView(self.parent),
+            view=OrderMenuView(self.owner_view),
             ephemeral=True,
         )
 
