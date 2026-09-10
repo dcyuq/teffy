@@ -537,26 +537,34 @@ class OrderFlowSelect(discord.ui.Select):
 
     async def callback(self, interaction):
         value = self.values[0]
+
         if value == "order":
+            self.setup_view.settings[TICKET_BUTTON_KEY] = self.button_data["key"]
             enable_order_button(
                 interaction.guild,
                 self.button_data,
                 self.setup_view.settings,
             )
-            self.setup_view.settings[TICKET_BUTTON_KEY] = self.button_data["key"]
-        else:
-            disable_order_button(
-                self.button_data,
-                self.setup_view.settings,
+            confirmation.save_config()
+            await interaction.response.send_modal(
+                OrderQuestionsSetupModal(
+                    self.setup_view,
+                    self.button_data,
+                )
             )
-            if self.setup_view.settings.get(TICKET_BUTTON_KEY) == self.button_data["key"]:
-                self.setup_view.settings.pop(TICKET_BUTTON_KEY, None)
+            return
+
+        disable_order_button(
+            self.button_data,
+            self.setup_view.settings,
+        )
+        if self.setup_view.settings.get(TICKET_BUTTON_KEY) == self.button_data["key"]:
+            self.setup_view.settings.pop(TICKET_BUTTON_KEY, None)
+
         confirmation.save_config()
+
         await interaction.response.edit_message(
-            content=(
-                f"`{self.button_data['label']}` is now using the "
-                f"**{'order' if value == 'order' else 'normal'}** flow."
-            ),
+            content=f"`{self.button_data['label']}` is now using the **normal** flow.",
             view=None,
         )
         await self.setup_view.refresh()
@@ -598,13 +606,93 @@ def disable_order_button(button_data, settings):
     ticket.save_config()
 
 
+class OrderQuestionsSetupModal(discord.ui.Modal):
+    def __init__(self, setup_view, button_data):
+        self.setup_view = setup_view
+        self.button_data = button_data
+        existing = button_data.get("questions", [])
+
+        super().__init__(title="Order Questions")
+
+        defaults = [
+            ("Discord Username", "ex. @username"),
+            ("Exact Name of Order", "ex. gamepass ct, intro boosh, kanba"),
+            ("Quantity", "ex. 1x, 2pcs, 1m"),
+            ("Payment Method", "ex. gcash, maya, paypal, gotyme"),
+            ("Details / Notes", "optional details about the order"),
+        ]
+
+        self.fields = []
+
+        for index, (default_label, placeholder) in enumerate(defaults):
+            current = existing[index] if index < len(existing) else {}
+            field = discord.ui.TextInput(
+                label=f"Question {index + 1}",
+                default=current.get("label", default_label)[:45],
+                placeholder=placeholder[:100],
+                required=False,
+                max_length=45,
+            )
+            self.fields.append(field)
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        questions = []
+
+        keys = [
+            "user",
+            "item",
+            "quantity",
+            "payment",
+            "notes",
+        ]
+
+        for key, field in zip(keys, self.fields):
+            label = field.value.strip()
+            if not label:
+                continue
+
+            questions.append(
+                {
+                    "key": key,
+                    "label": label[:45],
+                    "placeholder": "",
+                    "style": "short",
+                    "required": True,
+                }
+            )
+
+        if not questions:
+            await interaction.response.send_message(
+                "at least one order question is required.",
+                ephemeral=True,
+            )
+            return
+
+        self.button_data["questions"] = questions
+        self.button_data[ORDER_ENABLED_KEY] = True
+        ticket.save_config()
+        confirmation.save_config()
+
+        await interaction.response.send_message(
+            f"`{self.button_data['label']}` is now using the **order** flow with {len(questions)} question(s).",
+            ephemeral=True,
+        )
+        await self.setup_view.refresh()
+
+
 class OrderTicketQuestionModal(discord.ui.Modal):
     def __init__(self, button_data):
         super().__init__(title=button_data["label"][:45])
         self.button_data = button_data
         self.inputs = []
+
         for question in button_data.get("questions", [])[:5]:
-            style = discord.TextStyle.paragraph if question.get("style") == "paragraph" else discord.TextStyle.short
+            style = (
+                discord.TextStyle.paragraph
+                if question.get("style") == "paragraph"
+                else discord.TextStyle.short
+            )
             field = discord.ui.TextInput(
                 label=question["label"][:45],
                 placeholder=question.get("placeholder", "")[:100] or None,
@@ -612,19 +700,79 @@ class OrderTicketQuestionModal(discord.ui.Modal):
                 required=bool(question.get("required", True)),
                 max_length=1000,
             )
-            self.inputs.append((question.get("key") or question["label"], question["label"], field))
+            self.inputs.append(
+                (
+                    question.get("key") or question["label"],
+                    question["label"],
+                    field,
+                )
+            )
             self.add_item(field)
 
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True)
         answers = []
+
         for key, label, field in self.inputs:
-            value = field.value.strip()
-            answers.append((key, value))
-        await ticket.create_ticket(interaction, self.button_data, answers)
+            answers.append((key, field.value.strip()))
+
+        await ticket.create_ticket(
+            interaction,
+            self.button_data,
+            answers,
+        )
+
+
+class OrderTicketOpenButton(ticket.TicketOpenButton):
+    async def callback(self, interaction):
+        settings = ticket.get_config(interaction.guild.id)
+
+        if not ticket.is_configured(settings):
+            await interaction.response.send_message(
+                embed=confirmation.embeds.error(
+                    "the ticket system isn't finished being set up."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        button_data = ticket.find_button(
+            settings,
+            self.button_key,
+        )
+
+        if button_data is None:
+            await interaction.response.send_message(
+                embed=confirmation.embeds.error(
+                    "this button is no longer configured."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if button_data.get(ORDER_ENABLED_KEY):
+            await interaction.response.send_modal(
+                OrderTicketQuestionModal(button_data)
+            )
+            return
+
+        if button_data.get("questions"):
+            await interaction.response.send_modal(
+                _original_ticket_question_modal(button_data)
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await ticket.create_ticket(
+            interaction,
+            button_data,
+            [],
+        )
 
 
 _original_ticket_question_modal = ticket.TicketQuestionModal
+_original_ticket_open_button = ticket.TicketOpenButton
+ticket.TicketOpenButton = OrderTicketOpenButton
 class TicketButtonSelect(discord.ui.Select):
     def __init__(self, setup_view):
         self.setup_view = setup_view
@@ -1120,16 +1268,6 @@ class FinalOrderTicketView(discord.ui.LayoutView):
             )
         )
         self.add_item(controls)
-
-
-class RoutedTicketQuestionModal(_original_ticket_question_modal):
-    def __new__(cls, button_data):
-        if button_data.get(ORDER_ENABLED_KEY):
-            return OrderTicketQuestionModal(button_data)
-        return super().__new__(cls)
-
-
-ticket.TicketQuestionModal = RoutedTicketQuestionModal
 
 
 _original_create_ticket = ticket.create_ticket
