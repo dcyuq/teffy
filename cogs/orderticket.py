@@ -767,8 +767,6 @@ async def order_ticket_open_callback(self, interaction):
 
 ticket.TicketOpenButton.callback = order_ticket_open_callback
 
-_original_ticket_open_button = ticket.TicketOpenButton
-ticket.TicketOpenButton = OrderTicketOpenButton
 class TicketButtonSelect(discord.ui.Select):
     def __init__(self, setup_view):
         self.setup_view = setup_view
