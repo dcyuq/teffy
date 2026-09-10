@@ -607,11 +607,7 @@ def patch_confirmation_setup():
 
 OriginalTicketOpenButton = ticket.TicketOpenButton
 OriginalTicketSelect = ticket.TicketSelect
-def patch_ticket_builder_status():
-    builder_view = ticket.BuilderView
 
-    if getattr(builder_view, "_order_status_patched", False):
-        return
 
 def order_button_data(guild_id, button_key):
     settings = ticket.get_config(guild_id)
@@ -627,11 +623,7 @@ def order_button_data(guild_id, button_key):
     ):
         return button_data
     return None
-    original_status_embed = builder_view.status_embed
 
-    def patched_status_embed(self):
-        sync_ticket_override(self.ctx.guild.id)
-        return original_status_embed(self)
 
 class OrderTicketOpenButton(OriginalTicketOpenButton):
     async def callback(self, interaction):
@@ -640,8 +632,6 @@ class OrderTicketOpenButton(OriginalTicketOpenButton):
             await send_order_modal(interaction, button_data)
             return
         await OriginalTicketOpenButton.callback(self, interaction)
-    builder_view.status_embed = patched_status_embed
-    builder_view._order_status_patched = True
 
 
 class OrderTicketSelect(OriginalTicketSelect):
@@ -660,7 +650,6 @@ patch_confirmation_setup()
 ticket.TicketOpenButton = OrderTicketOpenButton
 ticket.TicketSelect = OrderTicketSelect
 patch_ticket_callbacks()
-patch_ticket_builder_status()
 for guild_id in list(config):
     sync_ticket_override(int(guild_id))
 ticket.ORDER_OVERRIDE_CALLBACK = order_override
