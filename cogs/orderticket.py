@@ -933,7 +933,7 @@ class OrderFormSetupButton(discord.ui.Button):
         super().__init__(
             label="order form",
             style=discord.ButtonStyle.secondary,
-            row=3,
+            row=4,
         )
         self.setup_view = setup_view
 
@@ -964,7 +964,7 @@ class PaymentSetupButton(discord.ui.Button):
         super().__init__(
             label="payment methods",
             style=discord.ButtonStyle.secondary,
-            row=3,
+            row=4,
         )
         self.setup_view = setup_view
 
@@ -991,36 +991,35 @@ class PaymentSetupButton(discord.ui.Button):
 
 
 _original_setup_init = confirmation.SetupView.__init__
+_original_setup_refresh = confirmation.SetupView.refresh
 _original_status_embed = confirmation.SetupView.status_embed
+
+
+def add_order_setup_controls(view):
+    existing = {type(item) for item in view.children}
+
+    if TicketButtonSetupButton not in existing:
+        view.add_item(TicketButtonSetupButton(view))
+
+    if ReceiptFormatSetupButton not in existing:
+        view.add_item(ReceiptFormatSetupButton(view))
+
+    if PaymentSetupButton not in existing:
+        view.add_item(PaymentSetupButton(view))
+
+    if OrderFormSetupButton not in existing:
+        view.add_item(OrderFormSetupButton(view))
 
 
 def setup_init(self, ctx, settings):
     _original_setup_init(self, ctx, settings)
     receipt_settings(settings)
+    add_order_setup_controls(self)
 
-    if not any(
-        isinstance(item, TicketButtonSetupButton)
-        for item in self.children
-    ):
-        self.add_item(TicketButtonSetupButton(self))
 
-    if not any(
-        isinstance(item, ReceiptFormatSetupButton)
-        for item in self.children
-    ):
-        self.add_item(ReceiptFormatSetupButton(self))
-
-    if not any(
-        isinstance(item, PaymentSetupButton)
-        for item in self.children
-    ):
-        self.add_item(PaymentSetupButton(self))
-
-    if not any(
-        isinstance(item, OrderFormSetupButton)
-        for item in self.children
-    ):
-        self.add_item(OrderFormSetupButton(self))
+async def setup_refresh(self, interaction=None):
+    add_order_setup_controls(self)
+    return await _original_setup_refresh(self, interaction)
 
 
 def status_embed(self):
@@ -1064,6 +1063,7 @@ def status_embed(self):
 
 
 confirmation.SetupView.__init__ = setup_init
+confirmation.SetupView.refresh = setup_refresh
 confirmation.SetupView.status_embed = status_embed
 
 
