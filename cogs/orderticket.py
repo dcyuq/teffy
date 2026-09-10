@@ -31,6 +31,45 @@ DEFAULT_PAYMENTS = [
     }
 ]
 
+DEFAULT_ORDER_FORM = {
+    "title": "order form ♡",
+    "description": "please fill in the details below.",
+    "fields": [
+        {
+            "key": "user",
+            "label": "♡ : discord username",
+            "placeholder": "ex. @username",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "item",
+            "label": "♡ : exact name of order",
+            "placeholder": "ex. gamepass ct, intro boosh, kanba",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "quantity",
+            "label": "♡ : quantity",
+            "placeholder": "ex. 1x, 2pcs, 1m",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "payment",
+            "label": "♡ : payment method",
+            "placeholder": "gcash, maya, paypal, gotyme",
+            "style": "short",
+            "required": True,
+        },
+    ],
+}
+
+ORDER_FORM_KEY = "ticket_order_form"
+ORDER_ENABLED_KEY = "ticket_order_enabled"
+ORIGINAL_QUESTIONS_KEY = "ticket_order_original_questions"
+
 ITEM_WORDS = {
     "item", "order", "product", "service",
     "what are you ordering", "what would you like",
@@ -72,14 +111,21 @@ def build_order(answers, author_id):
         "notes": "",
         "user": f"<@{author_id}>",
     }
-
     leftovers = []
 
     for question, answer in answers:
         answer = (answer or "").strip()
         if not answer:
             continue
-
+        key = question if question in {"item", "price", "quantity", "notes", "user"} else None
+        if key == "user":
+            continue
+        if key == "payment":
+            leftovers.append(f"payment method : {answer}")
+            continue
+        if key in order and not order[key]:
+            order[key] = answer
+            continue
         if not order["item"] and contains(question, ITEM_WORDS):
             order["item"] = answer
         elif not order["price"] and contains(question, PRICE_WORDS):
@@ -93,27 +139,46 @@ def build_order(answers, author_id):
         else:
             leftovers.append(f"{question.strip()} : {answer}")
 
-    nonempty = [
-        (question, answer.strip())
-        for question, answer in answers
-        if (answer or "").strip()
-    ]
-
-    if not order["item"] and nonempty:
-        order["item"] = nonempty[0][1]
-
     order["item"] = order["item"] or "not provided"
     order["price"] = order["price"] or "not provided"
     order["quantity"] = order["quantity"] or "not provided"
     order["notes"] = "\n".join(leftovers) or "none"
-
     return order
 
 
 def receipt_settings(settings):
     settings.setdefault(RECEIPT_FORMAT_KEY, DEFAULT_RECEIPT_FORMAT)
     settings.setdefault(PAYMENTS_KEY, [dict(x) for x in DEFAULT_PAYMENTS])
+    if ORDER_FORM_KEY not in settings:
+        settings[ORDER_FORM_KEY] = {
+            "title": DEFAULT_ORDER_FORM["title"],
+            "description": DEFAULT_ORDER_FORM["description"],
+            "fields": [dict(field) for field in DEFAULT_ORDER_FORM["fields"]],
+        }
+    else:
+        form = settings[ORDER_FORM_KEY]
+        form.setdefault("title", DEFAULT_ORDER_FORM["title"])
+        form.setdefault("description", DEFAULT_ORDER_FORM["description"])
+        form.setdefault("fields", [dict(field) for field in DEFAULT_ORDER_FORM["fields"]])
+        for index, field in enumerate(form["fields"]):
+            if index >= len(DEFAULT_ORDER_FORM["fields"]):
+                break
+            base = DEFAULT_ORDER_FORM["fields"][index]
+            field.setdefault("key", base["key"])
+            field.setdefault("label", base["label"])
+            field.setdefault("placeholder", base["placeholder"])
+            field.setdefault("style", base["style"])
+            field.setdefault("required", base["required"])
     return settings
+
+
+def order_form(settings):
+    receipt_settings(settings)
+    return settings[ORDER_FORM_KEY]
+
+
+def order_field_map(settings):
+    return {field.get("key"): field for field in order_form(settings).get("fields", [])}
 
 
 def selected_button(settings, guild):
@@ -295,6 +360,271 @@ class PaymentManageView(discord.ui.View):
         )
 
 
+class OrderFormModal(discord.ui.Modal):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        form = order_form(setup_view.settings)
+        super().__init__(title="Order Form Design")
+        self.title_field = discord.ui.TextInput(
+            label="Form title",
+            default=form.get("title", "order form ♡")[:45],
+            max_length=45,
+            required=True,
+        )
+        self.description_field = discord.ui.TextInput(
+            label="Form description",
+            default=form.get("description", "")[:400],
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+            required=False,
+        )
+        self.add_item(self.title_field)
+        self.add_item(self.description_field)
+
+    async def on_submit(self, interaction):
+        form = order_form(self.setup_view.settings)
+        form["title"] = self.title_field.value.strip() or "order form ♡"
+        form["description"] = self.description_field.value.strip()
+        confirmation.save_config()
+        await interaction.response.edit_message(
+            embed=self.setup_view.status_embed(),
+            view=self.setup_view,
+        )
+
+
+class OrderFieldModal(discord.ui.Modal):
+    def __init__(self, setup_view, index):
+        self.setup_view = setup_view
+        self.index = index
+        form = order_form(setup_view.settings)
+        existing = form.get("fields", [])[index] if index < len(form.get("fields", [])) else {}
+        super().__init__(title=f"Order Field {index + 1}")
+        self.label_field = discord.ui.TextInput(
+            label="Field label",
+            default=existing.get("label", "")[:45],
+            max_length=45,
+            required=True,
+        )
+        self.placeholder_field = discord.ui.TextInput(
+            label="Placeholder",
+            default=existing.get("placeholder", "")[:100],
+            max_length=100,
+            required=False,
+        )
+        self.key_field = discord.ui.TextInput(
+            label="Field key",
+            default=existing.get("key", "")[:45],
+            placeholder="item, price, quantity, notes, payment, user",
+            max_length=45,
+            required=True,
+        )
+        self.style_field = discord.ui.TextInput(
+            label="Box style",
+            default=existing.get("style", "short")[:10],
+            placeholder="short or paragraph",
+            max_length=10,
+            required=True,
+        )
+        self.required_field = discord.ui.TextInput(
+            label="Required",
+            default="yes" if existing.get("required", True) else "no",
+            placeholder="yes or no",
+            max_length=3,
+            required=True,
+        )
+        for field in (
+            self.label_field,
+            self.placeholder_field,
+            self.key_field,
+            self.style_field,
+            self.required_field,
+        ):
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        style = self.style_field.value.strip().lower()
+        if style not in {"short", "paragraph"}:
+            await interaction.response.send_message(
+                "box style must be `short` or `paragraph`.",
+                ephemeral=True,
+            )
+            return
+        required = self.required_field.value.strip().lower()
+        if required not in {"yes", "no"}:
+            await interaction.response.send_message(
+                "required must be `yes` or `no`.",
+                ephemeral=True,
+            )
+            return
+        form = order_form(self.setup_view.settings)
+        fields = form.setdefault("fields", [])
+        while len(fields) <= self.index:
+            fields.append({
+                "key": f"field{len(fields) + 1}",
+                "label": f"field {len(fields) + 1}",
+                "placeholder": "",
+                "style": "short",
+                "required": True,
+            })
+        fields[self.index] = {
+            "key": self.key_field.value.strip().lower().replace(" ", "_"),
+            "label": self.label_field.value.strip(),
+            "placeholder": self.placeholder_field.value.strip(),
+            "style": style,
+            "required": required == "yes",
+        }
+        confirmation.save_config()
+        await interaction.response.edit_message(
+            embed=self.setup_view.status_embed(),
+            view=self.setup_view,
+        )
+
+
+class OrderFormDesignView(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        for index, field in enumerate(order_form(setup_view.settings).get("fields", [])[:5]):
+            self.add_item(OrderFieldButton(setup_view, index, field))
+
+    @discord.ui.button(label="Form title / intro", style=discord.ButtonStyle.secondary, row=1)
+    async def form_text(self, interaction, button):
+        await interaction.response.send_modal(OrderFormModal(self.setup_view))
+
+
+class OrderFieldButton(discord.ui.Button):
+    def __init__(self, setup_view, index, field):
+        super().__init__(
+            label=f"Field {index + 1}",
+            style=discord.ButtonStyle.secondary,
+            row=0 if index < 5 else 1,
+        )
+        self.setup_view = setup_view
+        self.index = index
+        self.field = field
+
+    async def callback(self, interaction):
+        await interaction.response.send_modal(
+            OrderFieldModal(self.setup_view, self.index)
+        )
+
+
+class OrderFlowSelect(discord.ui.Select):
+    def __init__(self, setup_view, button_data):
+        self.setup_view = setup_view
+        self.button_data = button_data
+        current = "order" if button_data.get(ORDER_ENABLED_KEY) else "normal"
+        options = [
+            discord.SelectOption(
+                label="Normal Ticket",
+                value="normal",
+                description="keep the button opening instantly or using its normal questions.",
+                default=current == "normal",
+            ),
+            discord.SelectOption(
+                label="Order",
+                value="order",
+                description="automatically apply the order form questions.",
+                default=current == "order",
+            ),
+        ]
+        super().__init__(
+            placeholder="select the ticket flow",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction):
+        value = self.values[0]
+        if value == "order":
+            enable_order_button(
+                interaction.guild,
+                self.button_data,
+                self.setup_view.settings,
+            )
+            self.setup_view.settings[TICKET_BUTTON_KEY] = self.button_data["key"]
+        else:
+            disable_order_button(
+                self.button_data,
+                self.setup_view.settings,
+            )
+            if self.setup_view.settings.get(TICKET_BUTTON_KEY) == self.button_data["key"]:
+                self.setup_view.settings.pop(TICKET_BUTTON_KEY, None)
+        confirmation.save_config()
+        await interaction.response.edit_message(
+            content=(
+                f"`{self.button_data['label']}` is now using the "
+                f"**{'order' if value == 'order' else 'normal'}** flow."
+            ),
+            view=None,
+        )
+        await self.setup_view.refresh()
+
+
+class OrderFlowView(discord.ui.View):
+    def __init__(self, setup_view, button_data):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.button_data = button_data
+        self.add_item(OrderFlowSelect(setup_view, button_data))
+
+
+def enable_order_button(guild, button_data, settings):
+    if ORIGINAL_QUESTIONS_KEY not in button_data:
+        button_data[ORIGINAL_QUESTIONS_KEY] = [dict(q) for q in button_data.get("questions", [])]
+    form = order_form(settings)
+    button_data[ORDER_ENABLED_KEY] = True
+    button_data["questions"] = [
+        {
+            "label": field["label"][:45],
+            "key": field.get("key", "")[:45],
+            "placeholder": field.get("placeholder", "")[:100],
+            "style": field.get("style", "short"),
+            "required": bool(field.get("required", True)),
+        }
+        for field in form.get("fields", [])[:5]
+        if field.get("label")
+    ]
+    ticket.save_config()
+
+
+def disable_order_button(button_data, settings):
+    button_data[ORDER_ENABLED_KEY] = False
+    if ORIGINAL_QUESTIONS_KEY in button_data:
+        button_data["questions"] = [dict(q) for q in button_data.pop(ORIGINAL_QUESTIONS_KEY)]
+    else:
+        button_data["questions"] = []
+    ticket.save_config()
+
+
+class OrderTicketQuestionModal(discord.ui.Modal):
+    def __init__(self, button_data):
+        super().__init__(title=button_data["label"][:45])
+        self.button_data = button_data
+        self.inputs = []
+        for question in button_data.get("questions", [])[:5]:
+            style = discord.TextStyle.paragraph if question.get("style") == "paragraph" else discord.TextStyle.short
+            field = discord.ui.TextInput(
+                label=question["label"][:45],
+                placeholder=question.get("placeholder", "")[:100] or None,
+                style=style,
+                required=bool(question.get("required", True)),
+                max_length=1000,
+            )
+            self.inputs.append((question.get("key") or question["label"], question["label"], field))
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        answers = []
+        for key, label, field in self.inputs:
+            value = field.value.strip()
+            answers.append((key, value))
+        await ticket.create_ticket(interaction, self.button_data, answers)
+
+
+_original_ticket_question_modal = ticket.TicketQuestionModal
 class TicketButtonSelect(discord.ui.Select):
     def __init__(self, setup_view):
         self.setup_view = setup_view
@@ -356,20 +686,18 @@ class TicketButtonSelect(discord.ui.Select):
                 )
                 return
 
-            if not button_data.get("questions"):
-                await interaction.response.send_message(
-                    "that ticket button needs questions first. "
-                    "set them in `/ticket setup`.",
-                    ephemeral=True,
-                )
-                return
-
-            self.setup_view.settings[TICKET_BUTTON_KEY] = value
+            await interaction.response.edit_message(
+                content=(
+                    f"`{button_data['label']}` selected. choose the flow below."
+                ),
+                view=OrderFlowView(self.setup_view, button_data),
+            )
+            return
 
         confirmation.save_config()
 
         await interaction.response.edit_message(
-            content="ticket button selection saved.",
+            content="order ticket button selection cleared.",
             view=None,
         )
 
@@ -403,7 +731,7 @@ class TicketButtonSetupButton(discord.ui.Button):
             return
 
         await interaction.response.send_message(
-            "choose the ticket button that should use the order flow.",
+            "choose a ticket button, then choose whether it stays normal or uses the order flow.",
             view=TicketButtonPicker(self.setup_view),
             ephemeral=True,
         )
@@ -453,6 +781,37 @@ class ReceiptFormatOnlyView(discord.ui.View):
     async def edit_format(self, interaction, button):
         await interaction.response.send_modal(
             ReceiptFormatModal(self.setup_view)
+        )
+
+
+class OrderFormSetupButton(discord.ui.Button):
+    def __init__(self, setup_view):
+        super().__init__(
+            label="order form",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+        )
+        self.setup_view = setup_view
+
+    async def callback(self, interaction):
+        form = order_form(self.setup_view.settings)
+        fields = form.get("fields", [])
+        lines = [
+            f"**{form.get('title', 'order form ♡')}**",
+            form.get("description") or "no intro text",
+            "",
+            "**fields**",
+        ]
+        for index, field in enumerate(fields[:5]):
+            style = field.get("style", "short")
+            required = "required" if field.get("required", True) else "optional"
+            lines.append(
+                f"{index + 1}. **{field.get('label', 'field')}** · {style} · {required}"
+            )
+        await interaction.response.send_message(
+            embed=discord.Embed(description="\n".join(lines)[:4096]),
+            view=OrderFormDesignView(self.setup_view),
+            ephemeral=True,
         )
 
 
@@ -513,6 +872,12 @@ def setup_init(self, ctx, settings):
     ):
         self.add_item(PaymentSetupButton(self))
 
+    if not any(
+        isinstance(item, OrderFormSetupButton)
+        for item in self.children
+    ):
+        self.add_item(OrderFormSetupButton(self))
+
 
 def status_embed(self):
     receipt_settings(self.settings)
@@ -535,12 +900,19 @@ def status_embed(self):
         if methods
         else "none"
     )
+    form = order_form(self.settings)
+    form_fields = ", ".join(
+        field.get("key", "field")
+        for field in form.get("fields", [])[:5]
+    ) or "none"
 
     embed.description = (
         (embed.description or "")
         + "\n\n"
         + f"**order ticket button** : {selected_text}\n"
         + f"**ticket receipt format** : configured\n"
+        + f"**order form** : {form.get('title', 'order form ♡')}\n"
+        + f"**order fields** : {form_fields}\n"
         + f"**payment methods** : {payment_text}"
     )[:4096]
 
@@ -748,6 +1120,16 @@ class FinalOrderTicketView(discord.ui.LayoutView):
             )
         )
         self.add_item(controls)
+
+
+class RoutedTicketQuestionModal(_original_ticket_question_modal):
+    def __new__(cls, button_data):
+        if button_data.get(ORDER_ENABLED_KEY):
+            return OrderTicketQuestionModal(button_data)
+        return super().__new__(cls)
+
+
+ticket.TicketQuestionModal = RoutedTicketQuestionModal
 
 
 _original_create_ticket = ticket.create_ticket
