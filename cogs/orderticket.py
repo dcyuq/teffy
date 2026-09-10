@@ -723,54 +723,50 @@ class OrderTicketQuestionModal(discord.ui.Modal):
         )
 
 
-class OrderTicketOpenButton(ticket.TicketOpenButton):
-    async def callback(self, interaction):
-        settings = ticket.get_config(interaction.guild.id)
-
-        if not ticket.is_configured(settings):
-            await interaction.response.send_message(
-                embed=confirmation.embeds.error(
-                    "the ticket system isn't finished being set up."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        button_data = ticket.find_button(
-            settings,
-            self.button_key,
-        )
-
-        if button_data is None:
-            await interaction.response.send_message(
-                embed=confirmation.embeds.error(
-                    "this button is no longer configured."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        if button_data.get(ORDER_ENABLED_KEY):
-            await interaction.response.send_modal(
-                OrderTicketQuestionModal(button_data)
-            )
-            return
-
-        if button_data.get("questions"):
-            await interaction.response.send_modal(
-                _original_ticket_question_modal(button_data)
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        await ticket.create_ticket(
-            interaction,
-            button_data,
-            [],
-        )
-
-
+_original_ticket_open_callback = ticket.TicketOpenButton.callback
 _original_ticket_question_modal = ticket.TicketQuestionModal
+
+
+async def order_ticket_open_callback(self, interaction):
+    settings = ticket.get_config(interaction.guild.id)
+
+    if not ticket.is_configured(settings):
+        await interaction.response.send_message(
+            embed=confirmation.embeds.error(
+                "the ticket system isn't finished being set up."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    button_data = ticket.find_button(
+        settings,
+        self.button_key,
+    )
+
+    if button_data is None:
+        await interaction.response.send_message(
+            embed=confirmation.embeds.error(
+                "this button is no longer configured."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    if button_data.get(ORDER_ENABLED_KEY):
+        await interaction.response.send_modal(
+            OrderTicketQuestionModal(button_data)
+        )
+        return
+
+    await _original_ticket_open_callback(
+        self,
+        interaction,
+    )
+
+
+ticket.TicketOpenButton.callback = order_ticket_open_callback
+
 _original_ticket_open_button = ticket.TicketOpenButton
 ticket.TicketOpenButton = OrderTicketOpenButton
 class TicketButtonSelect(discord.ui.Select):
