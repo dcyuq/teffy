@@ -77,7 +77,24 @@ def settings_for(guild_id):
     return settings
 
 
+def sync_ticket_override(guild_id):
+    order_settings = settings_for(guild_id)
+    ticket_settings = ticket.get_config(guild_id)
+    if not ticket_settings:
+        return
+    selected_key = order_settings.get("button_key")
+    changed = False
+    for button_data in ticket_settings.get("buttons", []):
+        enabled = selected_key is not None and button_data.get("key") == selected_key
+        if button_data.get("order_enabled") != enabled:
+            button_data["order_enabled"] = enabled
+            changed = True
+    if changed:
+        ticket.save_config()
+
+
 def selected_button(guild_id):
+    sync_ticket_override(guild_id)
     settings = ticket.get_config(guild_id)
     order_settings = settings_for(guild_id)
     if not settings or not order_settings.get("button_key"):
@@ -518,12 +535,19 @@ def order_button_data(guild_id, button_key):
     button_data = ticket.find_button(settings, button_key)
     if button_data is None:
         return None
+async def order_override(interaction, button_data):
+    order_settings = settings_for(interaction.guild.id)
     if (
         order_settings.get("button_key") == button_key
         or button_data.get("order_enabled")
+        order_settings.get("button_key") != button_data.get("key")
+        and not button_data.get("order_enabled")
     ):
         return button_data
     return None
+        return False
+    await send_order_modal(interaction, button_data)
+    return True
 
 
 class OrderTicketOpenButton(OriginalTicketOpenButton):
@@ -550,6 +574,9 @@ class OrderTicketSelect(OriginalTicketSelect):
 patch_confirmation_setup()
 ticket.TicketOpenButton = OrderTicketOpenButton
 ticket.TicketSelect = OrderTicketSelect
+for guild_id in list(config):
+    sync_ticket_override(int(guild_id))
+ticket.ORDER_OVERRIDE_CALLBACK = order_override
 
 
 class OrderTickets(commands.Cog):
