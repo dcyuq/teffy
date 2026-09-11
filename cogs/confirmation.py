@@ -253,8 +253,43 @@ class ConfirmView(discord.ui.LayoutView):
         self.add_item(box)
 
     async def confirm(self, interaction):
-        view = TermsView(self.settings, self.order, self.author_id, interaction.guild)
-        await interaction.response.edit_message(view=view)
+
+
+        # Advance directly to Terms & Conditions.
+
+
+        # Do not invoke /confirmation or recreate the confirmation message.
+
+
+        settings = self.settings
+
+
+        await interaction.response.send_message(
+
+
+            view=TermsView(
+
+
+                settings=settings,
+
+
+                order=self.order,
+
+
+                author_id=self.author_id,
+
+
+                guild=interaction.guild,
+
+
+            ),
+
+
+            ephemeral=True,
+
+
+        )
+
 
 
 class TermsRow(discord.ui.ActionRow):
