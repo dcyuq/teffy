@@ -1,411 +1,1237 @@
-import copy
 import logging
-import re
+import uuid
 
 import discord
 from discord.ext import commands
 
-import cogs.confirmation as confirmation
 import cogs.ticket as ticket
-from storage import Store
+import cogs.confirmation as confirmation
 
 log = logging.getLogger(__name__)
 
-_store = Store("orderticket_config.json")
-config = _store.load()
+TICKET_BUTTON_KEY = "ticket_button_key"
+RECEIPT_FORMAT_KEY = "ticket_receipt_format"
+PAYMENTS_KEY = "ticket_payment_methods"
 
-DEFAULT_FIELDS = [
+DEFAULT_RECEIPT_FORMAT = (
+    "**order confirmation**\n"
+    "\n"
+    "order : {item}\n"
+    "amount : {price}\n"
+    "quantity : {quantity}\n"
+    "details/notes : {notes}\n"
+    "customer : {user}"
+)
+
+DEFAULT_PAYMENTS = [
     {
-        "key": "item",
-        "label": "Exact Name of Order",
-        "placeholder": "What are you ordering?",
-        "style": "short",
-        "required": True,
-    },
-    {
-        "key": "price",
-        "label": "Price",
-        "placeholder": "Amount or price",
-        "style": "short",
-        "required": True,
-    },
-    {
-        "key": "quantity",
-        "label": "Quantity",
-        "placeholder": "How many?",
-        "style": "short",
-        "required": True,
-    },
-    {
-        "key": "notes",
-        "label": "Details / Notes",
-        "placeholder": "Anything else the seller should know?",
-        "style": "paragraph",
-        "required": False,
-    },
+        "key": "gcash",
+        "label": "gcash",
+        "text": "",
+    }
 ]
 
-def save_config():
-    _store.save(config)
+DEFAULT_ORDER_FORM = {
+    "title": "order form ♡",
+    "description": "please fill in the details below.",
+    "fields": [
+        {
+            "key": "user",
+            "label": "♡ : discord username",
+            "placeholder": "ex. @username",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "item",
+            "label": "♡ : exact name of order",
+            "placeholder": "ex. gamepass ct, intro boosh, kanba",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "quantity",
+            "label": "♡ : quantity",
+            "placeholder": "ex. 1x, 2pcs, 1m",
+            "style": "short",
+            "required": True,
+        },
+        {
+            "key": "payment",
+            "label": "♡ : payment method",
+            "placeholder": "gcash, maya, paypal, gotyme",
+            "style": "short",
+            "required": True,
+        },
+    ],
+}
+
+ORDER_FORM_KEY = "ticket_order_form"
+ORDER_ENABLED_KEY = "ticket_order_enabled"
+ORIGINAL_QUESTIONS_KEY = "ticket_order_original_questions"
+
+ITEM_WORDS = {
+    "item", "order", "product", "service",
+    "what are you ordering", "what would you like",
+    "what do you want", "exact order", "name of order",
+}
+
+PRICE_WORDS = {
+    "price", "amount", "cost", "total", "budget", "how much",
+}
+
+QUANTITY_WORDS = {
+    "quantity", "qty", "how many", "number of", "amount needed",
+}
+
+NOTES_WORDS = {
+    "note", "notes", "detail", "details", "extra", "additional",
+    "anything else",
+}
+
+PAYMENT_WORDS = {
+    "payment", "payment method", "mode of payment", "mop",
+}
 
 
-def default_settings():
-    return {
-        "button_key": None,
-        "fields": copy.deepcopy(DEFAULT_FIELDS),
-    }
+def normal(text):
+    return " ".join((text or "").strip().lower().split())
 
 
-def settings_for(guild_id):
-    key = str(guild_id)
-    if key not in config:
-        config[key] = default_settings()
-    settings = config[key]
-    defaults = default_settings()
-    settings.setdefault("button_key", defaults["button_key"])
-    settings.setdefault("fields", copy.deepcopy(defaults["fields"]))
-    fields = settings.get("fields")
-    if not isinstance(fields, list) or len(fields) != len(DEFAULT_FIELDS):
-        settings["fields"] = copy.deepcopy(DEFAULT_FIELDS)
-    for index, field in enumerate(settings["fields"]):
-        source = DEFAULT_FIELDS[index]
-        field.setdefault("key", source["key"])
-        field.setdefault("label", source["label"])
-        field.setdefault("placeholder", source["placeholder"])
-        field.setdefault("style", source["style"])
-        field.setdefault("required", source["required"])
-    return settings
+def contains(text, words):
+    text = normal(text)
+    return any(word in text for word in words)
 
 
-def sync_ticket_override(guild_id):
-    order_settings = settings_for(guild_id)
-    ticket_settings = ticket.get_config(guild_id)
-    if not ticket_settings:
-        return
-    selected_key = order_settings.get("button_key")
-    changed = False
-    for button_data in ticket_settings.get("buttons", []):
-        enabled = selected_key is not None and button_data.get("key") == selected_key
-        if enabled:
-            if "order_original_questions" not in button_data:
-                button_data["order_original_questions"] = copy.deepcopy(
-                    button_data.get("questions", [])
-                )
-            questions = [
-                {"label": field["label"]}
-                for field in order_settings["fields"][:5]
-            ]
-            if button_data.get("questions") != questions:
-                button_data["questions"] = questions
-                changed = True
-        else:
-            original = button_data.pop("order_original_questions", None)
-            if original is not None and button_data.get("questions") != original:
-                button_data["questions"] = original
-                changed = True
-        if button_data.get("order_enabled") != enabled:
-            button_data["order_enabled"] = enabled
-            changed = True
-    if changed:
-        ticket.save_config()
-
-
-def selected_button(guild_id):
-    sync_ticket_override(guild_id)
-    settings = ticket.get_config(guild_id)
-    order_settings = settings_for(guild_id)
-    if not settings or not order_settings.get("button_key"):
-        return None
-    return ticket.find_button(settings, order_settings["button_key"])
-
-
-def button_label(guild_id):
-    button_data = selected_button(guild_id)
-    return button_data["label"] if button_data else "none"
-
-
-def answer_kind(label):
-    text = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
-    if any(word in text for word in ("payment", "pay", "method")):
-        return "payment"
-    if any(word in text for word in ("quantity", "qty", "how many")):
-        return "quantity"
-    if any(word in text for word in ("price", "amount", "cost", "total")):
-        return "price"
-    if any(word in text for word in ("note", "detail", "description", "extra")):
-        return "notes"
-    if any(word in text for word in ("user", "username", "customer", "discord")):
-        return "user"
-    if any(word in text for word in ("item", "order", "product", "name")):
-        return "item"
-    return None
-
-
-def order_from_values(values, answers, user):
+def build_order(answers, author_id):
     order = {
-        "item": values.get("item", "").strip(),
-        "price": values.get("price", "").strip(),
-        "quantity": values.get("quantity", "").strip(),
-        "notes": values.get("notes", "").strip(),
-        "user": user.mention,
-        "answers": answers,
+        "item": "",
+        "price": "",
+        "quantity": "",
+        "notes": "",
+        "user": f"<@{author_id}>",
     }
-    for label, answer in answers:
-        kind = answer_kind(label)
-        if kind and not order.get(kind):
-            order[kind] = answer
-    fallback = [answer for _, answer in answers if answer]
-    if not order["item"] and fallback:
-        order["item"] = fallback[0]
-    if not order["price"] and len(fallback) > 1:
-        order["price"] = fallback[1]
-    if not order["quantity"] and len(fallback) > 2:
-        order["quantity"] = fallback[2]
-    if not order["notes"] and len(fallback) > 3:
-        order["notes"] = fallback[-1]
+    leftovers = []
+
+    for question, answer in answers:
+        answer = (answer or "").strip()
+        if not answer:
+            continue
+        key = question if question in {"item", "price", "quantity", "notes", "user"} else None
+        if key == "user":
+            continue
+        if key == "payment":
+            leftovers.append(f"payment method : {answer}")
+            continue
+        if key in order and not order[key]:
+            order[key] = answer
+            continue
+        if not order["item"] and contains(question, ITEM_WORDS):
+            order["item"] = answer
+        elif not order["price"] and contains(question, PRICE_WORDS):
+            order["price"] = answer
+        elif not order["quantity"] and contains(question, QUANTITY_WORDS):
+            order["quantity"] = answer
+        elif contains(question, PAYMENT_WORDS):
+            leftovers.append(f"payment method : {answer}")
+        elif contains(question, NOTES_WORDS):
+            leftovers.append(answer)
+        else:
+            leftovers.append(f"{question.strip()} : {answer}")
+
+    order["item"] = order["item"] or "not provided"
+    order["price"] = order["price"] or "not provided"
+    order["quantity"] = order["quantity"] or "not provided"
+    order["notes"] = "\n".join(leftovers) or "none"
     return order
 
 
-def render_receipt(order, user, guild):
-    settings = confirmation.settings_for(guild.id)
-    template = settings.get(
+def receipt_settings(settings):
+    settings.setdefault(RECEIPT_FORMAT_KEY, DEFAULT_RECEIPT_FORMAT)
+    settings.setdefault(PAYMENTS_KEY, [dict(x) for x in DEFAULT_PAYMENTS])
+    if ORDER_FORM_KEY not in settings:
+        settings[ORDER_FORM_KEY] = {
+            "title": DEFAULT_ORDER_FORM["title"],
+            "description": DEFAULT_ORDER_FORM["description"],
+            "fields": [dict(field) for field in DEFAULT_ORDER_FORM["fields"]],
+        }
+    else:
+        form = settings[ORDER_FORM_KEY]
+        form.setdefault("title", DEFAULT_ORDER_FORM["title"])
+        form.setdefault("description", DEFAULT_ORDER_FORM["description"])
+        form.setdefault("fields", [dict(field) for field in DEFAULT_ORDER_FORM["fields"]])
+        for index, field in enumerate(form["fields"]):
+            if index >= len(DEFAULT_ORDER_FORM["fields"]):
+                break
+            base = DEFAULT_ORDER_FORM["fields"][index]
+            field.setdefault("key", base["key"])
+            field.setdefault("label", base["label"])
+            field.setdefault("placeholder", base["placeholder"])
+            field.setdefault("style", base["style"])
+            field.setdefault("required", base["required"])
+    return settings
+
+
+def order_form(settings):
+    receipt_settings(settings)
+    return settings[ORDER_FORM_KEY]
+
+
+def order_field_map(settings):
+    return {field.get("key"): field for field in order_form(settings).get("fields", [])}
+
+
+def selected_button(settings, guild):
+    key = settings.get(TICKET_BUTTON_KEY)
+    if not key:
+        return None
+
+    ticket_settings = ticket.get_config(guild.id) or {}
+    return ticket.find_button(ticket_settings, key)
+
+
+def payment_methods(settings):
+    methods = settings.get(PAYMENTS_KEY) or []
+    return methods[:25]
+
+
+def render_receipt(settings, order, author_id, guild):
+    confirmation_settings = confirmation.settings_for(guild.id)
+    template = confirmation_settings.get(
         "confirm_format",
         confirmation.DEFAULT_CONFIRM_FORMAT,
     )
-    rendered = confirmation.render(template, order, user.id, guild)
-    details = "\n\n".join(
-        f"**{label[:256]}**\n{(answer or '-')[:1024]}"
-        for label, answer in order.get("answers", [])
-    )
-    if details:
-        rendered = f"{rendered[:3500]}\n\n**submitted details**\n{details}"
-    return rendered[:4000]
-
-
-def setup_status(guild_id):
-    button = selected_button(guild_id)
-    return discord.Embed(
-        title="Order ticket setup",
-        description=(
-            f"**order button** : {button['label'] if button else 'none'}\n"
-            "**questions** : item, price, quantity, notes\n\n"
-            "The selected ticket button always opens the order form first. "
-            "All other ticket buttons keep their normal ticket.py behavior."
-        ),
-    )
-
-
-class OrderConfirmRow(discord.ui.ActionRow):
-    def __init__(self, order, author_id, guild):
-        super().__init__()
-        self.order = order
-        self.author_id = author_id
-        self.guild = guild
-        settings = confirmation.settings_for(guild.id)
-        confirmation.apply_label(
-            self.confirm_order,
-            settings.get("confirm_button"),
-            guild,
-            "confirm order",
-        )
-
-    @discord.ui.button(
-        label="confirm order",
-        style=discord.ButtonStyle.secondary,
-        custom_id="orderticket:confirm",
-    )
-    async def confirm_order(self, interaction, button):
-        settings = confirmation.settings_for(interaction.guild.id)
-        await interaction.response.edit_message(
-            view=confirmation.ConfirmView(
-                settings,
-                self.order,
-                self.author_id,
-                interaction.guild,
-            )
-        )
-
-
-class OrderTicketView(discord.ui.LayoutView):
-    def __init__(self, ping, heading, welcome, receipt, color, order, author_id, guild):
-        super().__init__(timeout=None)
-        if ping:
-            self.add_item(discord.ui.TextDisplay(ping))
-        container = discord.ui.Container(
-            accent_colour=discord.Colour(color) if color else None
-        )
-        container.add_item(discord.ui.TextDisplay(heading[:2000]))
-        container.add_item(discord.ui.Separator())
-        if welcome:
-            container.add_item(discord.ui.TextDisplay(welcome[:2000]))
-        container.add_item(
-            discord.ui.Separator(
-                spacing=discord.SeparatorSpacing.large,
-                visible=False,
-            )
-        )
-        container.add_item(discord.ui.TextDisplay(receipt[:4000]))
-        self.add_item(container)
-        self.add_item(ticket.TicketControls())
-        self.add_item(OrderConfirmRow(order, author_id, guild))
-
-
-def build_order_view(ping, heading, welcome, receipt, color, order, author_id, guild):
-    return OrderTicketView(
-        ping,
-        heading,
-        welcome,
-        receipt,
-        color,
+    return confirmation.render(
+        template,
         order,
         author_id,
         guild,
-    )
+    )[:4000]
 
 
-class OrderButtonSelect(discord.ui.Select):
-    def __init__(self, parent):
-        self.owner_view = parent
-        settings = ticket.get_config(parent.ctx.guild.id) or {}
-        buttons = settings.get("buttons", [])[:24]
-        order_settings = settings_for(parent.ctx.guild.id)
+class PaymentMethodModal(discord.ui.Modal):
+    def __init__(self, setup_view, existing=None):
+        self.setup_view = setup_view
+        self.existing = existing
+
+        super().__init__(
+            title="Edit Payment Method"
+            if existing
+            else "Add Payment Method"
+        )
+
+        self.label_field = discord.ui.TextInput(
+            label="Button label",
+            default=(existing or {}).get("label", "")[:80],
+            max_length=80,
+            required=True,
+        )
+
+        self.text_field = discord.ui.TextInput(
+            label="Payment information",
+            default=(existing or {}).get("text", "")[:2000],
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+
+        self.add_item(self.label_field)
+        self.add_item(self.text_field)
+
+    async def on_submit(self, interaction):
+        methods = payment_methods(self.setup_view.settings)
+
+        if self.existing is None:
+            if len(methods) >= 25:
+                await interaction.response.send_message(
+                    embed=confirmation.embeds.error(
+                        "you already have 25 payment methods."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            methods.append(
+                {
+                    "key": uuid.uuid4().hex[:8],
+                    "label": self.label_field.value.strip(),
+                    "text": self.text_field.value.strip(),
+                }
+            )
+        else:
+            self.existing["label"] = self.label_field.value.strip()
+            self.existing["text"] = self.text_field.value.strip()
+
+        self.setup_view.settings[PAYMENTS_KEY] = methods
+        confirmation.save_config()
+
+        await interaction.response.edit_message(
+            embed=self.setup_view.status_embed(),
+            view=self.setup_view,
+        )
+
+
+class PaymentManageSelect(discord.ui.Select):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        methods = payment_methods(setup_view.settings)
+
         options = [
             discord.SelectOption(
-                label=button_data["label"][:100],
-                value=button_data["key"],
-                description="Use the order form for this button",
-                default=button_data["key"] == order_settings.get("button_key"),
+                label=method["label"][:100],
+                value=method["key"],
+                description="edit payment method",
             )
-            for button_data in buttons
+            for method in methods
         ]
-        options.append(
-            discord.SelectOption(
-                label="Disable order override",
-                value="none",
-                description="Return every ticket button to normal behavior",
-                default=order_settings.get("button_key") is None,
-            )
-        )
+
         super().__init__(
-            placeholder="Choose the Order button",
+            placeholder="select a payment method",
+            options=options or [
+                discord.SelectOption(
+                    label="none",
+                    value="none",
+                )
+            ],
+            disabled=not options,
+        )
+
+    async def callback(self, interaction):
+        method = next(
+            (
+                method
+                for method in payment_methods(self.setup_view.settings)
+                if method["key"] == self.values[0]
+            ),
+            None,
+        )
+
+        if method is None:
+            await interaction.response.send_message(
+                "that payment method no longer exists.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            PaymentMethodModal(self.setup_view, method)
+        )
+
+
+class PaymentManageView(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.add_item(PaymentManageSelect(setup_view))
+
+    @discord.ui.button(
+        label="Add Payment Method",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def add_method(self, interaction, button):
+        if len(payment_methods(self.setup_view.settings)) >= 25:
+            await interaction.response.send_message(
+                "you already have 25 payment methods.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            PaymentMethodModal(self.setup_view)
+        )
+
+
+class OrderFormModal(discord.ui.Modal):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        form = order_form(setup_view.settings)
+        super().__init__(title="Order Form Design")
+        self.title_field = discord.ui.TextInput(
+            label="Form title",
+            default=form.get("title", "order form ♡")[:45],
+            max_length=45,
+            required=True,
+        )
+        self.description_field = discord.ui.TextInput(
+            label="Form description",
+            default=form.get("description", "")[:400],
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+            required=False,
+        )
+        self.add_item(self.title_field)
+        self.add_item(self.description_field)
+
+    async def on_submit(self, interaction):
+        form = order_form(self.setup_view.settings)
+        form["title"] = self.title_field.value.strip() or "order form ♡"
+        form["description"] = self.description_field.value.strip()
+        confirmation.save_config()
+        await interaction.response.edit_message(
+            embed=self.setup_view.status_embed(),
+            view=self.setup_view,
+        )
+
+
+class OrderFieldModal(discord.ui.Modal):
+    def __init__(self, setup_view, index):
+        self.setup_view = setup_view
+        self.index = index
+        form = order_form(setup_view.settings)
+        existing = form.get("fields", [])[index] if index < len(form.get("fields", [])) else {}
+        super().__init__(title=f"Order Field {index + 1}")
+        self.label_field = discord.ui.TextInput(
+            label="Field label",
+            default=existing.get("label", "")[:45],
+            max_length=45,
+            required=True,
+        )
+        self.placeholder_field = discord.ui.TextInput(
+            label="Placeholder",
+            default=existing.get("placeholder", "")[:100],
+            max_length=100,
+            required=False,
+        )
+        self.key_field = discord.ui.TextInput(
+            label="Field key",
+            default=existing.get("key", "")[:45],
+            placeholder="item, price, quantity, notes, payment, user",
+            max_length=45,
+            required=True,
+        )
+        self.style_field = discord.ui.TextInput(
+            label="Box style",
+            default=existing.get("style", "short")[:10],
+            placeholder="short or paragraph",
+            max_length=10,
+            required=True,
+        )
+        self.required_field = discord.ui.TextInput(
+            label="Required",
+            default="yes" if existing.get("required", True) else "no",
+            placeholder="yes or no",
+            max_length=3,
+            required=True,
+        )
+        for field in (
+            self.label_field,
+            self.placeholder_field,
+            self.key_field,
+            self.style_field,
+            self.required_field,
+        ):
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        style = self.style_field.value.strip().lower()
+        if style not in {"short", "paragraph"}:
+            await interaction.response.send_message(
+                "box style must be `short` or `paragraph`.",
+                ephemeral=True,
+            )
+            return
+        required = self.required_field.value.strip().lower()
+        if required not in {"yes", "no"}:
+            await interaction.response.send_message(
+                "required must be `yes` or `no`.",
+                ephemeral=True,
+            )
+            return
+        form = order_form(self.setup_view.settings)
+        fields = form.setdefault("fields", [])
+        while len(fields) <= self.index:
+            fields.append({
+                "key": f"field{len(fields) + 1}",
+                "label": f"field {len(fields) + 1}",
+                "placeholder": "",
+                "style": "short",
+                "required": True,
+            })
+        fields[self.index] = {
+            "key": self.key_field.value.strip().lower().replace(" ", "_"),
+            "label": self.label_field.value.strip(),
+            "placeholder": self.placeholder_field.value.strip(),
+            "style": style,
+            "required": required == "yes",
+        }
+        confirmation.save_config()
+        await interaction.response.edit_message(
+            embed=self.setup_view.status_embed(),
+            view=self.setup_view,
+        )
+
+
+class OrderFormDesignView(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        for index, field in enumerate(order_form(setup_view.settings).get("fields", [])[:5]):
+            self.add_item(OrderFieldButton(setup_view, index, field))
+
+    @discord.ui.button(label="Form title / intro", style=discord.ButtonStyle.secondary, row=1)
+    async def form_text(self, interaction, button):
+        await interaction.response.send_modal(OrderFormModal(self.setup_view))
+
+
+class OrderFieldButton(discord.ui.Button):
+    def __init__(self, setup_view, index, field):
+        super().__init__(
+            label=f"Field {index + 1}",
+            style=discord.ButtonStyle.secondary,
+            row=0 if index < 5 else 1,
+        )
+        self.setup_view = setup_view
+        self.index = index
+        self.field = field
+
+    async def callback(self, interaction):
+        await interaction.response.send_modal(
+            OrderFieldModal(self.setup_view, self.index)
+        )
+
+
+class OrderFlowSelect(discord.ui.Select):
+    def __init__(self, setup_view, button_data):
+        self.setup_view = setup_view
+        self.button_data = button_data
+        current = "order" if button_data.get(ORDER_ENABLED_KEY) else "normal"
+        options = [
+            discord.SelectOption(
+                label="Normal Ticket",
+                value="normal",
+                description="keep the button opening instantly or using its normal questions.",
+                default=current == "normal",
+            ),
+            discord.SelectOption(
+                label="Order",
+                value="order",
+                description="automatically apply the order form questions.",
+                default=current == "order",
+            ),
+        ]
+        super().__init__(
+            placeholder="select the ticket flow",
             options=options,
             min_values=1,
             max_values=1,
         )
 
     async def callback(self, interaction):
-        order_settings = settings_for(interaction.guild.id)
-        selected_key = None if self.values[0] == "none" else self.values[0]
-        order_settings["button_key"] = selected_key
-        save_config()
-        sync_ticket_override(interaction.guild.id)
-        await interaction.response.edit_message(
-            embed=setup_status(interaction.guild.id),
-            view=OrderMenuView(self.owner_view),
-        )
-        await self.owner_view.refresh()
+        value = self.values[0]
 
-
-class OrderButtonMenuView(discord.ui.View):
-    def __init__(self, parent):
-        super().__init__(timeout=300)
-        self.owner_view = parent
-        self.add_item(OrderButtonSelect(parent))
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id == self.owner_view.ctx.author.id:
-            return True
-        await interaction.response.send_message(
-            embed=discord.Embed(description="this panel isn't yours."),
-            ephemeral=True,
-        )
-        return False
-
-
-class OrderMenuView(discord.ui.View):
-    def __init__(self, parent):
-        super().__init__(timeout=300)
-        self.owner_view = parent
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id == self.owner_view.ctx.author.id:
-            return True
-        await interaction.response.send_message(
-            embed=discord.Embed(description="this panel isn't yours."),
-            ephemeral=True,
-        )
-        return False
-
-    @discord.ui.button(label="choose order button", style=discord.ButtonStyle.secondary)
-    async def choose_button(self, interaction, button):
-        await interaction.response.edit_message(
-            embed=setup_status(interaction.guild.id),
-            view=OrderButtonMenuView(self.owner_view),
-        )
-
-    @discord.ui.button(label="edit order form", style=discord.ButtonStyle.secondary)
-    async def edit_form(self, interaction, button):
-        await interaction.response.send_modal(OrderFieldsModal(self.owner_view))
-
-class OrderFieldsModal(discord.ui.Modal):
-    def __init__(self, parent):
-        super().__init__(title="Edit order form labels")
-        self.owner_view = parent
-        self.inputs = []
-        fields = settings_for(self.owner_view.ctx.guild.id)["fields"]
-        for index, field in enumerate(fields):
-            text_input = discord.ui.TextInput(
-                label=f"Field {index + 1} label",
-                default=field["label"][:45],
-                max_length=45,
-                required=True,
+        if value == "order":
+            self.setup_view.settings[TICKET_BUTTON_KEY] = self.button_data["key"]
+            enable_order_button(
+                interaction.guild,
+                self.button_data,
+                self.setup_view.settings,
             )
-            self.inputs.append((field, text_input))
-            self.add_item(text_input)
+            confirmation.save_config()
+            await interaction.response.send_modal(
+                OrderQuestionsSetupModal(
+                    self.setup_view,
+                    self.button_data,
+                )
+            )
+            return
+
+        disable_order_button(
+            self.button_data,
+            self.setup_view.settings,
+        )
+        if self.setup_view.settings.get(TICKET_BUTTON_KEY) == self.button_data["key"]:
+            self.setup_view.settings.pop(TICKET_BUTTON_KEY, None)
+
+        confirmation.save_config()
+
+        await interaction.response.edit_message(
+            content=f"`{self.button_data['label']}` is now using the **normal** flow.",
+            view=None,
+        )
+        await self.setup_view.refresh()
+
+
+class OrderFlowView(discord.ui.View):
+    def __init__(self, setup_view, button_data):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.button_data = button_data
+        self.add_item(OrderFlowSelect(setup_view, button_data))
+
+
+def enable_order_button(guild, button_data, settings):
+    if ORIGINAL_QUESTIONS_KEY not in button_data:
+        button_data[ORIGINAL_QUESTIONS_KEY] = [dict(q) for q in button_data.get("questions", [])]
+    form = order_form(settings)
+    button_data[ORDER_ENABLED_KEY] = True
+    button_data["questions"] = [
+        {
+            "label": field["label"][:45],
+            "key": field.get("key", "")[:45],
+            "placeholder": field.get("placeholder", "")[:100],
+            "style": field.get("style", "short"),
+            "required": bool(field.get("required", True)),
+        }
+        for field in form.get("fields", [])[:5]
+        if field.get("label")
+    ]
+    ticket.save_config()
+
+
+def disable_order_button(button_data, settings):
+    button_data[ORDER_ENABLED_KEY] = False
+    if ORIGINAL_QUESTIONS_KEY in button_data:
+        button_data["questions"] = [dict(q) for q in button_data.pop(ORIGINAL_QUESTIONS_KEY)]
+    else:
+        button_data["questions"] = []
+    ticket.save_config()
+
+
+class OrderQuestionsSetupModal(discord.ui.Modal):
+    def __init__(self, setup_view, button_data):
+        self.setup_view = setup_view
+        self.button_data = button_data
+        existing = button_data.get("questions", [])
+
+        super().__init__(title="Order Questions")
+
+        defaults = [
+            ("Discord Username", "ex. @username"),
+            ("Exact Name of Order", "ex. gamepass ct, intro boosh, kanba"),
+            ("Quantity", "ex. 1x, 2pcs, 1m"),
+            ("Payment Method", "ex. gcash, maya, paypal, gotyme"),
+            ("Details / Notes", "optional details about the order"),
+        ]
+
+        self.fields = []
+
+        for index, (default_label, placeholder) in enumerate(defaults):
+            current = existing[index] if index < len(existing) else {}
+            field = discord.ui.TextInput(
+                label=f"Question {index + 1}",
+                default=current.get("label", default_label)[:45],
+                placeholder=placeholder[:100],
+                required=False,
+                max_length=45,
+            )
+            self.fields.append(field)
+            self.add_item(field)
 
     async def on_submit(self, interaction):
-        for field, text_input in self.inputs:
-            field["label"] = text_input.value.strip()[:45]
-        save_config()
-        sync_ticket_override(interaction.guild.id)
+        questions = []
+
+        keys = [
+            "user",
+            "item",
+            "quantity",
+            "payment",
+            "notes",
+        ]
+
+        for key, field in zip(keys, self.fields):
+            label = field.value.strip()
+            if not label:
+                continue
+
+            questions.append(
+                {
+                    "key": key,
+                    "label": label[:45],
+                    "placeholder": "",
+                    "style": "short",
+                    "required": True,
+                }
+            )
+
+        if not questions:
+            await interaction.response.send_message(
+                "at least one order question is required.",
+                ephemeral=True,
+            )
+            return
+
+        self.button_data["questions"] = questions
+        self.button_data[ORDER_ENABLED_KEY] = True
+        ticket.save_config()
+        confirmation.save_config()
+
         await interaction.response.send_message(
-            embed=discord.Embed(description="the order form labels were saved."),
+            f"`{self.button_data['label']}` is now using the **order** flow with {len(questions)} question(s).",
             ephemeral=True,
         )
-        await self.owner_view.refresh()
-class OrderSetupButton(discord.ui.Button):
-    def __init__(self, parent):
-        self.owner_view = parent
+        await self.setup_view.refresh()
+
+
+class OrderTicketQuestionModal(discord.ui.Modal):
+    def __init__(self, button_data):
+        super().__init__(title=button_data["label"][:45])
+        self.button_data = button_data
+        self.inputs = []
+
+        for question in button_data.get("questions", [])[:5]:
+            style = (
+                discord.TextStyle.paragraph
+                if question.get("style") == "paragraph"
+                else discord.TextStyle.short
+            )
+            field = discord.ui.TextInput(
+                label=question["label"][:45],
+                placeholder=question.get("placeholder", "")[:100] or None,
+                style=style,
+                required=bool(question.get("required", True)),
+                max_length=1000,
+            )
+            self.inputs.append(
+                (
+                    question.get("key") or question["label"],
+                    question["label"],
+                    field,
+                )
+            )
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        answers = []
+
+        for key, label, field in self.inputs:
+            answers.append((key, field.value.strip()))
+
+        await ticket.create_ticket(
+            interaction,
+            self.button_data,
+            answers,
+        )
+
+
+_original_ticket_open_callback = ticket.TicketOpenButton.callback
+_original_ticket_question_modal = ticket.TicketQuestionModal
+
+
+async def order_ticket_open_callback(self, interaction):
+    settings = ticket.get_config(interaction.guild.id)
+
+    if not ticket.is_configured(settings):
+        await interaction.response.send_message(
+            embed=confirmation.embeds.error(
+                "the ticket system isn't finished being set up."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    button_data = ticket.find_button(
+        settings,
+        self.button_key,
+    )
+
+    if button_data is None:
+        await interaction.response.send_message(
+            embed=confirmation.embeds.error(
+                "this button is no longer configured."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    if button_data.get(ORDER_ENABLED_KEY):
+        await interaction.response.send_modal(
+            OrderTicketQuestionModal(button_data)
+        )
+        return
+
+    await _original_ticket_open_callback(
+        self,
+        interaction,
+    )
+
+
+ticket.TicketOpenButton.callback = order_ticket_open_callback
+
+class TicketButtonSelect(discord.ui.Select):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        guild = setup_view.ctx.guild
+        ticket_settings = ticket.get_config(guild.id) or {}
+
+        options = []
+
+        for button_data in ticket_settings.get("buttons", [])[:24]:
+            questions = button_data.get("questions", [])
+
+            options.append(
+                discord.SelectOption(
+                    label=button_data["label"][:100],
+                    value=button_data["key"],
+                    description=(
+                        f"{len(questions)} question(s)"
+                        if questions
+                        else "opens instantly"
+                    )[:100],
+                    default=(
+                        button_data["key"]
+                        == setup_view.settings.get(TICKET_BUTTON_KEY)
+                    ),
+                    emoji=ticket.icon_partial(
+                        button_data.get("emoji")
+                    ),
+                )
+            )
+
+        options.append(
+            discord.SelectOption(
+                label="None - disable",
+                value="none",
+                description="Disable the order ticket integration.",
+            )
+        )
+
         super().__init__(
-            label="order tickets",
+            placeholder="select the ticket button",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction):
+        value = self.values[0]
+
+        if value == "none":
+            self.setup_view.settings.pop(TICKET_BUTTON_KEY, None)
+        else:
+            ticket_settings = ticket.get_config(interaction.guild.id) or {}
+            button_data = ticket.find_button(ticket_settings, value)
+
+            if button_data is None:
+                await interaction.response.send_message(
+                    "that ticket button no longer exists.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.edit_message(
+                content=(
+                    f"`{button_data['label']}` selected. choose the flow below."
+                ),
+                view=OrderFlowView(self.setup_view, button_data),
+            )
+            return
+
+        confirmation.save_config()
+
+        await interaction.response.edit_message(
+            content="order ticket button selection cleared.",
+            view=None,
+        )
+
+        await self.setup_view.refresh()
+
+
+class TicketButtonPicker(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.add_item(TicketButtonSelect(setup_view))
+
+
+class TicketButtonSetupButton(discord.ui.Button):
+    def __init__(self, setup_view):
+        super().__init__(
+            label="ticket button",
             style=discord.ButtonStyle.secondary,
             row=3,
-            custom_id="orderticket:setup",
+        )
+        self.setup_view = setup_view
+
+    async def callback(self, interaction):
+        ticket_settings = ticket.get_config(interaction.guild.id) or {}
+
+        if not ticket_settings.get("buttons"):
+            await interaction.response.send_message(
+                "create a ticket button in `/ticket setup` first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "choose a ticket button, then choose whether it stays normal or uses the order flow.",
+            view=TicketButtonPicker(self.setup_view),
+            ephemeral=True,
+        )
+
+
+class OrderFormSetupButton(discord.ui.Button):
+    def __init__(self, setup_view):
+        super().__init__(
+            label="order form",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+        self.setup_view = setup_view
+
+    async def callback(self, interaction):
+        form = order_form(self.setup_view.settings)
+        fields = form.get("fields", [])
+        lines = [
+            f"**{form.get('title', 'order form ♡')}**",
+            form.get("description") or "no intro text",
+            "",
+            "**fields**",
+        ]
+        for index, field in enumerate(fields[:5]):
+            style = field.get("style", "short")
+            required = "required" if field.get("required", True) else "optional"
+            lines.append(
+                f"{index + 1}. **{field.get('label', 'field')}** · {style} · {required}"
+            )
+        await interaction.response.send_message(
+            embed=discord.Embed(description="\n".join(lines)[:4096]),
+            view=OrderFormDesignView(self.setup_view),
+            ephemeral=True,
+        )
+
+
+class PaymentSetupButton(discord.ui.Button):
+    def __init__(self, setup_view):
+        super().__init__(
+            label="payment methods",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+        self.setup_view = setup_view
+
+    async def callback(self, interaction):
+        methods = payment_methods(self.setup_view.settings)
+
+        description = (
+            "\n".join(
+                f"- {method['label']}"
+                for method in methods
+            )
+            if methods
+            else "no payment methods configured."
+        )
+
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="Payment Methods",
+                description=description,
+            ),
+            view=PaymentManageView(self.setup_view),
+            ephemeral=True,
+        )
+
+
+_original_setup_init = confirmation.SetupView.__init__
+_original_setup_refresh = confirmation.SetupView.refresh
+_original_status_embed = confirmation.SetupView.status_embed
+
+
+def add_order_setup_controls(view):
+    existing = {type(item) for item in view.children}
+
+    if TicketButtonSetupButton not in existing:
+        view.add_item(TicketButtonSetupButton(view))
+
+    if PaymentSetupButton not in existing:
+        view.add_item(PaymentSetupButton(view))
+
+    if OrderFormSetupButton not in existing:
+        view.add_item(OrderFormSetupButton(view))
+
+
+def setup_init(self, ctx, settings):
+    _original_setup_init(self, ctx, settings)
+    receipt_settings(settings)
+    add_order_setup_controls(self)
+
+
+async def setup_refresh(self, interaction=None):
+    add_order_setup_controls(self)
+    return await _original_setup_refresh(self, interaction)
+
+
+def status_embed(self):
+    receipt_settings(self.settings)
+    embed = _original_status_embed(self)
+
+    selected = selected_button(
+        self.settings,
+        self.ctx.guild,
+    )
+
+    selected_text = (
+        selected["label"]
+        if selected
+        else "not set"
+    )
+
+    methods = payment_methods(self.settings)
+    payment_text = (
+        ", ".join(method["label"] for method in methods)
+        if methods
+        else "none"
+    )
+    form = order_form(self.settings)
+    form_fields = ", ".join(
+        field.get("key", "field")
+        for field in form.get("fields", [])[:5]
+    ) or "none"
+
+    embed.description = (
+        (embed.description or "")
+        + "\n\n"
+        + f"**order ticket button** : {selected_text}\n"
+        + f"**confirmation format** : uses confirmation setup\n"
+        + f"**order form** : {form.get('title', 'order form ♡')}\n"
+        + f"**order fields** : {form_fields}\n"
+        + f"**payment methods** : {payment_text}"
+    )[:4096]
+
+    return embed
+
+
+confirmation.SetupView.__init__ = setup_init
+confirmation.SetupView.refresh = setup_refresh
+confirmation.SetupView.status_embed = status_embed
+
+
+class OrderConfirmButton(discord.ui.Button):
+    def __init__(self, order, author_id, settings, guild):
+        super().__init__(
+            label="confirm",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"orderticket:confirm:{uuid.uuid4().hex}",
+        )
+        self.order = order
+        self.author_id = author_id
+        self.settings = settings
+
+        confirmation.apply_label(
+            self,
+            settings.get("confirm_button"),
+            guild,
+            "confirm order",
         )
 
     async def callback(self, interaction):
         await interaction.response.send_message(
-            embed=setup_status(interaction.guild.id),
-            view=OrderMenuView(self.owner_view),
+            view=confirmation.ConfirmView(
+                self.settings,
+                self.order,
+                self.author_id,
+                interaction.guild,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+class OrderConfirmButton(discord.ui.Button):
+    def __init__(self, order, author_id, settings, guild):
+        super().__init__(
+            label="confirm",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"orderticket:confirm:{uuid.uuid4().hex}",
+        )
+        self.order = order
+        self.author_id = author_id
+        self.settings = settings
+
+        confirmation.apply_label(
+            self,
+            settings.get("confirm_button"),
+            guild,
+            "confirm order",
+        )
+
+    async def callback(self, interaction):
+        methods = payment_methods(self.settings)
+
+        if not methods:
+            await interaction.response.send_message(
+                embed=confirmation.embeds.error(
+                    "no payment methods are configured."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if len(methods) == 1:
+            await interaction.response.send_message(
+                view=PaymentMethodView(
+                    self.settings,
+                    self.order,
+                    self.author_id,
+                    methods,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            view=PaymentMethodView(
+                self.settings,
+                self.order,
+                self.author_id,
+                methods,
+            ),
             ephemeral=True,
         )
 
 
-async def order_override(interaction, button_data):
-    order_settings = settings_for(interaction.guild.id)
-    selected = (
-        order_settings.get("button_key") == button_data.get("key")
-        or button_data.get("order_enabled")
+class PaymentMethodButton(discord.ui.Button):
+    def __init__(self, settings, order, author_id, method):
+        super().__init__(
+            label=method["label"][:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"orderticket:payment:{method['key']}",
+        )
+        self.settings = settings
+        self.order = order
+        self.author_id = author_id
+        self.method = method
+
+    async def callback(self, interaction):
+        text = self.method.get("text") or ""
+
+        if not text:
+            if self.method["key"] == "gcash":
+                text = settings_gcash_text(
+                    self.settings,
+                    self.order,
+                    self.author_id,
+                    interaction.guild,
+                )
+            else:
+                text = "payment information has not been configured."
+
+        rendered = confirmation.render(
+            text,
+            self.order,
+            self.author_id,
+            interaction.guild,
+        )
+
+        await interaction.response.send_message(
+            content=rendered[:2000],
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+def settings_gcash_text(settings, order, author_id, guild):
+    text = settings.get("gcash_text") or ""
+    return confirmation.render(
+        text,
+        order,
+        author_id,
+        guild,
     )
-    if selected:
-        button_data["questions"] = [
-            {"label": field["label"]}
-            for field in order_settings["fields"][:5]
-        ]
-        button_data["order_enabled"] = True
-        ticket.save_config()
-    else:
-        sync_ticket_override(interaction.guild.id)
+
+
+class PaymentMethodView(discord.ui.LayoutView):
+    def __init__(self, settings, order, author_id, methods):
+        super().__init__(timeout=300)
+
+        methods = methods[:25]
+
+        if not methods:
+            return
+
+        for start in range(0, len(methods), 5):
+            row = discord.ui.ActionRow()
+            for method in methods[start:start + 5]:
+                row.add_item(
+                    PaymentMethodButton(
+                        settings,
+                        order,
+                        author_id,
+                        method,
+                    )
+                )
+            self.add_item(row)
+
+
+class OrderTicketControls(discord.ui.ActionRow):
+    def __init__(self, order, author_id, settings, guild):
+        super().__init__()
+
+        self.add_item(
+            OrderConfirmButton(
+                order,
+                author_id,
+                settings,
+                guild,
+            )
+        )
+
+
+class FinalOrderTicketView(discord.ui.LayoutView):
+    def __init__(self, guild, ping, order, author_id, settings):
+        super().__init__(timeout=None)
+
+        self.guild = guild
+        self.order = order
+        self.author_id = author_id
+        self.settings = settings
+
+        # Keep the ping outside the container, exactly like the confirmation UI.
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping[:2000]))
+
+        # Discord Components V2 Container. No accent_colour is supplied, so
+        # there is no coloured bar on the left.
+        box = discord.ui.Container()
+        box.add_item(
+            discord.ui.TextDisplay(
+                render_receipt(settings, order, author_id, guild)
+            )
+        )
+        box.add_item(discord.ui.Separator())
+
+        # Both sets of ticket controls live underneath the confirmation format
+        # inside the same container.
+        box.add_item(ticket.TicketControls())
+
+        confirm_row = discord.ui.ActionRow()
+        confirm_row.add_item(
+            OrderConfirmButton(
+                order,
+                author_id,
+                settings,
+                guild,
+            )
+        )
+        box.add_item(confirm_row)
+
+        self.add_item(box)
+
+
+async def order_override(interaction, button_data):
+    settings = receipt_settings(confirmation.settings_for(interaction.guild.id))
+
+    if not button_data.get(ORDER_ENABLED_KEY):
+        return False
+
+    if button_data.get("key") != settings.get(TICKET_BUTTON_KEY):
+        return False
+
+    # enable_order_button() keeps the selected button's questions synchronized
+    # with the configured Order form. Returning False lets ticket.py's existing
+    # TicketQuestionModal open before a channel is created.
+    form = order_form(settings)
+    button_data["questions"] = [
+        {
+            "label": field["label"][:45],
+            "key": field.get("key", "")[:45],
+            "placeholder": field.get("placeholder", "")[:100],
+            "style": field.get("style", "short"),
+            "required": bool(field.get("required", True)),
+        }
+        for field in form.get("fields", [])[:5]
+        if field.get("label")
+    ]
+    ticket.save_config()
     return False
 
 
@@ -420,123 +1246,132 @@ async def order_ticket_view(
     detail,
     color,
 ):
-    settings = settings_for(interaction.guild.id)
-    if (
-        settings.get("button_key") != button_data.get("key")
-        and not button_data.get("order_enabled")
-    ):
+    settings = receipt_settings(confirmation.settings_for(interaction.guild.id))
+
+    if not button_data.get(ORDER_ENABLED_KEY):
         return None
-    order = order_from_values({}, answers, interaction.user)
-    receipt = render_receipt(order, interaction.user, interaction.guild)
-    return build_order_view(
-        ping,
-        heading,
-        welcome,
-        receipt,
-        color,
-        order,
-        interaction.user.id,
-        interaction.guild,
+
+    if button_data.get("key") != settings.get(TICKET_BUTTON_KEY):
+        return None
+
+    order = build_order(answers, interaction.user.id)
+
+    return FinalOrderTicketView(
+        guild=interaction.guild,
+        ping=ping,
+        order=order,
+        author_id=interaction.user.id,
+        settings=settings,
     )
 
 
-async def order_ticket_created(interaction, button_data, answers, channel, message):
-    settings = settings_for(interaction.guild.id)
-    if (
-        settings.get("button_key") != button_data.get("key")
-        and not button_data.get("order_enabled")
-    ):
+async def order_ticket_created(
+    interaction,
+    button_data,
+    answers,
+    channel,
+    opening_message,
+):
+    settings = receipt_settings(confirmation.settings_for(interaction.guild.id))
+
+    if not button_data.get(ORDER_ENABLED_KEY):
         return
-    order = order_from_values({}, answers, interaction.user)
+
+    if button_data.get("key") != settings.get(TICKET_BUTTON_KEY):
+        return
+
     entry = ticket.tickets.get(channel.id)
     if entry is None:
         return
-    entry["order_data"] = order
-    entry["order_button_key"] = button_data["key"]
-    entry["order_message_id"] = message.id
+
+    entry["order_ticket"] = True
+    entry["order_button_key"] = button_data.get("key")
+    entry["order_data"] = build_order(answers, interaction.user.id)
+    entry["opening_message_id"] = opening_message.id
     ticket.save_tickets()
 
 
-def patch_confirmation_setup():
-    setup_view = confirmation.SetupView
-    if getattr(setup_view, "_orderticket_patched", False):
-        return
-    original_init = setup_view.__init__
-
-    def patched_init(self, ctx, settings):
-        original_init(self, ctx, settings)
-        self.add_item(OrderSetupButton(self))
-
-    setup_view.__init__ = patched_init
-    setup_view._orderticket_patched = True
+def install():
+    ticket.ORDER_OVERRIDE_CALLBACK = order_override
+    ticket.TICKET_VIEW_CALLBACK = order_ticket_view
+    ticket.TICKET_CREATED_CALLBACK = order_ticket_created
 
 
-patch_confirmation_setup()
-ticket.TICKET_VIEW_CALLBACK = order_ticket_view
-ticket.TICKET_CREATED_CALLBACK = order_ticket_created
-for guild_id in list(config):
-    sync_ticket_override(int(guild_id))
-ticket.ORDER_OVERRIDE_CALLBACK = order_override
+async def restore_views(bot):
+    for channel_id, entry in list(ticket.tickets.items()):
+        if not entry.get("order_ticket"):
+            continue
+
+        guild = bot.get_guild(entry.get("guild_id"))
+        if guild is None:
+            continue
+
+        settings = receipt_settings(
+            confirmation.settings_for(guild.id)
+        )
+
+        ticket_settings = ticket.get_config(guild.id) or {}
+        button_data = next(
+            (
+                button
+                for button in ticket_settings.get("buttons", [])
+                if button.get("key") == entry.get("order_button_key")
+                or button.get("label") == entry.get("kind")
+            ),
+            None,
+        )
+
+        if button_data is None:
+            continue
+
+        opener = guild.get_member(entry["opener_id"])
+        roles = ticket.staff_roles(
+            guild,
+            ticket_settings,
+        )
+
+        opener_text = opener.mention if opener else f"<@{entry['opener_id']}>"
+        ping = (opener_text + " " + " ".join(role.mention for role in roles)).strip()
+
+        order = build_order(
+            entry.get("answers", []),
+            entry["opener_id"],
+        )
+
+        view = FinalOrderTicketView(
+            guild=guild,
+            ping=ping,
+            order=order,
+            author_id=entry["opener_id"],
+            settings=settings,
+        )
+
+        try:
+            bot.add_view(
+                view,
+                message_id=entry.get("opening_message_id"),
+            )
+        except (ValueError, TypeError, discord.HTTPException):
+            log.exception(
+                "Failed to restore order ticket view for %s.",
+                channel_id,
+            )
 
 
-class OrderTickets(commands.Cog):
+class OrderTicket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._views_added = False
+        self.restored = False
+        install()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if self._views_added:
+        if self.restored:
             return
-        self._views_added = True
-        for channel_id, entry in ticket.tickets.items():
-            order = entry.get("order_data")
-            message_id = entry.get("order_message_id")
-            if not order or not message_id:
-                continue
-            guild = self.bot.get_guild(entry.get("guild_id"))
-            channel = guild.get_channel(channel_id) if guild else None
-            if guild is None or channel is None:
-                continue
-            settings = ticket.get_config(guild.id) or {}
-            button_data = ticket.find_button(
-                settings,
-                entry.get("order_button_key"),
-            )
-            if button_data is None:
-                for candidate in settings.get("buttons", []):
-                    if candidate.get("label") == entry.get("kind"):
-                        button_data = candidate
-                        break
-            if button_data is None:
-                continue
-            opener = guild.get_member(entry.get("opener_id"))
-            if opener is None:
-                continue
-            roles = ticket.staff_roles(guild, settings)
-            mentions = " ".join(role.mention for role in roles)
-            ping = f"{opener.mention} {mentions}".strip()
-            panel = settings.get("panel") or {}
-            receipt = render_receipt(
-                order,
-                opener,
-                guild,
-            )
-            view = build_order_view(
-                ping,
-                f"Ticket {entry.get('number', 0):04d} - {button_data['label']}",
-                button_data.get("welcome") or ticket.DEFAULT_BUTTON["welcome"],
-                receipt,
-                panel.get("color"),
-                order,
-                opener.id,
-                guild,
-            )
-            try:
-                self.bot.add_view(view, message_id=message_id)
-            except (discord.HTTPException, ValueError):
-                continue
+
+        self.restored = True
+        await restore_views(self.bot)
 
 
 async def setup(bot):
-    await bot.add_cog(OrderTickets(bot))
+    await bot.add_cog(OrderTicket(bot))
