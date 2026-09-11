@@ -933,7 +933,7 @@ class TicketQuestionModal(discord.ui.Modal):
         for question in button_data["questions"][:MAX_QUESTIONS]:
             field = discord.ui.TextInput(
                 label=question["label"][:45],
-                style=discord.TextStyle.paragraph,
+                style=discord.TextStyle.short,
                 required=question.get("required", True),
                 max_length=1000,
             )
