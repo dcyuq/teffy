@@ -32,6 +32,32 @@ DEFAULT_RECEIVED = (
     "\n"
     "kindly choose your payment option and remain patient for the owner to respond."
 )
+DEFAULT_TERMS_FORMAT = (
+    "**terms and conditions**\n"
+    "\n"
+    "please review the terms and conditions below before proceeding.\n"
+    "\n"
+    "by continuing, you agree to the terms and conditions for this order."
+)
+DEFAULT_TERMS_BUTTON = "yes, i agree"
+
+DEFAULT_PAYMENT_METHODS = [
+    {
+        "id": "gcash",
+        "label": "gcash",
+        "text": (
+            "**gcash info**\n"
+            "\n"
+            "no. 09xx xxx xxxx\n"
+            "initials : x.x\n"
+            "\n"
+            "> make sure you've read the tos\n"
+            "> always send a receipt\n"
+            "> no receipt = no transaction"
+        ),
+    }
+]
+
 DEFAULT_GCASH_BUTTON = "gcash"
 DEFAULT_GCASH_TEXT = (
     "**gcash info**\n"
@@ -89,6 +115,9 @@ def defaults():
         "footer": DEFAULT_FOOTER,
         "confirm_button": DEFAULT_CONFIRM_BUTTON,
         "received_format": DEFAULT_RECEIVED,
+        "terms_format": DEFAULT_TERMS_FORMAT,
+        "terms_button": DEFAULT_TERMS_BUTTON,
+        "payment_methods": [dict(method) for method in DEFAULT_PAYMENT_METHODS],
         "gcash_button": DEFAULT_GCASH_BUTTON,
         "gcash_text": DEFAULT_GCASH_TEXT,
     }
@@ -101,11 +130,34 @@ def ensure_config(guild_id):
     settings = config[key]
     for field, value in defaults().items():
         settings.setdefault(field, value)
+
+    # Migrate the old single-GCash configuration into the new payment-method list.
+    if not settings.get("payment_methods"):
+        settings["payment_methods"] = [{
+            "id": "gcash",
+            "label": settings.get("gcash_button") or DEFAULT_GCASH_BUTTON,
+            "text": settings.get("gcash_text") or DEFAULT_GCASH_TEXT,
+        }]
+
     return settings
 
 
 def settings_for(guild_id):
-    return config.get(str(guild_id)) or defaults()
+    settings = config.get(str(guild_id))
+    if not settings:
+        return defaults()
+
+    for field, value in defaults().items():
+        settings.setdefault(field, value)
+
+    if not settings.get("payment_methods"):
+        settings["payment_methods"] = [{
+            "id": "gcash",
+            "label": settings.get("gcash_button") or DEFAULT_GCASH_BUTTON,
+            "text": settings.get("gcash_text") or DEFAULT_GCASH_TEXT,
+        }]
+
+    return settings
 
 
 def order_values(order, author_id):
@@ -201,19 +253,76 @@ class ConfirmView(discord.ui.LayoutView):
         self.add_item(box)
 
     async def confirm(self, interaction):
+        view = TermsView(self.settings, self.order, self.author_id, interaction.guild)
+        await interaction.response.edit_message(view=view)
+
+
+class TermsRow(discord.ui.ActionRow):
+    def __init__(self, parent, raw, guild):
+        super().__init__()
+        self.owner = parent
+        apply_label(self.agree, raw, guild, "yes, i agree")
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def agree(self, interaction, button):
+        await self.owner.agree(interaction)
+
+
+class TermsView(discord.ui.LayoutView):
+    def __init__(self, settings, order, author_id, guild):
+        super().__init__(timeout=600)
+        self.settings = settings
+        self.order = order
+        self.author_id = author_id
+        self.guild = guild
+        self.build()
+
+    def build(self):
+        self.clear_items()
+        ping = render(self.settings.get("ping") or "", self.order, self.author_id, self.guild).strip()
+        if ping:
+            self.add_item(discord.ui.TextDisplay(ping[:2000]))
+
+        box = discord.ui.Container()
+        body = render(
+            self.settings.get("terms_format") or DEFAULT_TERMS_FORMAT,
+            self.order,
+            self.author_id,
+            self.guild,
+        )
+        box.add_item(discord.ui.TextDisplay(body[:4000]))
+        box.add_item(discord.ui.Separator())
+        box.add_item(TermsRow(self, self.settings.get("terms_button"), self.guild))
+        self.add_item(box)
+
+    async def agree(self, interaction):
         view = PaymentView(self.settings, self.order, self.author_id, interaction.guild)
         await interaction.response.edit_message(view=view)
 
 
-class GcashRow(discord.ui.ActionRow):
-    def __init__(self, parent, raw, guild):
+class PaymentMethodRow(discord.ui.ActionRow):
+    def __init__(self, parent, methods, guild):
         super().__init__()
         self.owner = parent
-        apply_label(self.pick, raw, guild, "gcash")
+        self.methods = methods
 
-    @discord.ui.button(style=discord.ButtonStyle.secondary)
-    async def pick(self, interaction, button):
-        await self.owner.pay(interaction)
+        # Discord action rows support up to five buttons. Payment methods beyond
+        # five are automatically split into additional rows by PaymentView.
+        for method in methods:
+            button = discord.ui.Button(style=discord.ButtonStyle.secondary)
+            apply_label(
+                button,
+                method.get("label"),
+                guild,
+                method.get("id", "payment"),
+            )
+            button.callback = self._make_callback(method)
+            self.add_item(button)
+
+    def _make_callback(self, method):
+        async def callback(interaction):
+            await self.owner.pay(interaction, method)
+        return callback
 
 
 class PaymentView(discord.ui.LayoutView):
@@ -227,33 +336,68 @@ class PaymentView(discord.ui.LayoutView):
 
     def build(self):
         self.clear_items()
+
         box = discord.ui.Container()
         box.add_item(discord.ui.TextDisplay(
-            render(self.settings["received_format"], self.order, self.author_id, self.guild)[:4000]
+            render(
+                self.settings.get("received_format") or DEFAULT_RECEIVED,
+                self.order,
+                self.author_id,
+                self.guild,
+            )[:4000]
         ))
         box.add_item(discord.ui.Separator())
-        box.add_item(GcashRow(self, self.settings.get("gcash_button"), self.guild))
+
+        methods = self.settings.get("payment_methods") or []
+        if not methods:
+            box.add_item(discord.ui.TextDisplay("no payment methods have been configured."))
+        else:
+            for index in range(0, len(methods), 5):
+                box.add_item(PaymentMethodRow(self, methods[index:index + 5], self.guild))
+
         self.add_item(box)
 
-    async def pay(self, interaction):
-        view = GcashBox(self.settings, self.order, self.author_id, interaction.guild)
+    async def pay(self, interaction, method):
+        view = PaymentMethodView(
+            self.settings,
+            self.order,
+            self.author_id,
+            interaction.guild,
+            method,
+        )
         await interaction.response.send_message(
-            view=view, allowed_mentions=discord.AllowedMentions.none()
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
-class GcashBox(discord.ui.LayoutView):
-    def __init__(self, settings, order, author_id, guild):
+class PaymentMethodView(discord.ui.LayoutView):
+    def __init__(self, settings, order, author_id, guild, method):
         super().__init__(timeout=None)
+        self.settings = settings
+        self.order = order
+        self.author_id = author_id
+        self.guild = guild
+        self.method = method
+        self.build()
+
+    def build(self):
         box = discord.ui.Container()
-        body = render(settings["gcash_text"], order, author_id, guild)
+        body = render(
+            self.method.get("text") or "",
+            self.order,
+            self.author_id,
+            self.guild,
+        )
         body, image_url = split_image(body)
+
         if body.strip():
             box.add_item(discord.ui.TextDisplay(body[:4000]))
         if image_url:
             gallery = discord.ui.MediaGallery()
             gallery.add_item(media=image_url)
             box.add_item(gallery)
+
         self.add_item(box)
 
 
@@ -280,6 +424,63 @@ class FieldModal(discord.ui.Modal):
             )
             return
         self.panel.settings[self.field] = value
+        save_config()
+        await interaction.response.defer()
+        await self.panel.refresh()
+
+
+class PaymentMethodsModal(discord.ui.Modal):
+    def __init__(self, panel):
+        super().__init__(title="payment methods")
+        self.panel = panel
+
+        methods = panel.settings.get("payment_methods") or []
+        lines = []
+        for method in methods:
+            label = (method.get("label") or method.get("id") or "payment").replace("|", "/")
+            body = (method.get("text") or "").replace("\n", "\\n").replace("|", "/")
+            lines.append(f"{label} | {body}")
+
+        self.methods_input = discord.ui.TextInput(
+            label="methods",
+            style=discord.TextStyle.paragraph,
+            default="\n".join(lines)[:4000],
+            placeholder="One method per line: label | details. Use \\n for line breaks.",
+            max_length=4000,
+            required=False,
+        )
+        self.add_item(self.methods_input)
+
+    async def on_submit(self, interaction):
+        methods = []
+        raw = self.methods_input.value.strip()
+
+        if raw:
+            for index, line in enumerate(raw.splitlines(), start=1):
+                if not line.strip():
+                    continue
+                label, separator, body = line.partition("|")
+                label = label.strip()
+                body = body.strip().replace("\\n", "\n")
+
+                if not separator or not label:
+                    await interaction.response.send_message(
+                        embed=embeds.error(
+                            f"invalid payment method on line {index}. "
+                            "use `label | details`."
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+
+                method_id = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or f"payment-{index}"
+                methods.append({
+                    "id": method_id,
+                    "label": label[:LABEL_LIMIT],
+                    "text": body[:4000],
+                })
+
+        self.panel.settings["payment_methods"] = methods
         save_config()
         await interaction.response.defer()
         await self.panel.refresh()
@@ -316,13 +517,14 @@ class SetupView(discord.ui.View):
             "**confirmation setup**",
             "",
             f"**confirm button** : {settings['confirm_button']}",
-            f"**gcash button** : {settings['gcash_button']}",
+            f"**terms button** : {settings['terms_button']}",
+            f"**payment methods** : {len(settings.get('payment_methods') or [])}",
             "",
             "**confirm box preview**",
             preview[:800],
             "",
-            "tip : start any button with an emoji like `:heart: confirm`, and paste "
-            "an image link inside the gcash text to show a qr under it.",
+            "tip : start any button with an emoji like `:heart: confirm`. "
+            "Payment method details can also contain an image link for a qr.",
         ]
         return embeds.build("\n".join(lines)[:4096])
 
@@ -361,13 +563,17 @@ class SetupView(discord.ui.View):
     async def received_format(self, interaction, button):
         await self.edit(interaction, "received_format", "received format", multiline=True)
 
-    @discord.ui.button(label="gcash button", style=discord.ButtonStyle.secondary, row=2)
-    async def gcash_button(self, interaction, button):
-        await self.edit(interaction, "gcash_button", "gcash button label", limit=LABEL_LIMIT)
+    @discord.ui.button(label="terms format", style=discord.ButtonStyle.secondary, row=2)
+    async def terms_format(self, interaction, button):
+        await self.edit(interaction, "terms_format", "terms and conditions", multiline=True)
 
-    @discord.ui.button(label="gcash text", style=discord.ButtonStyle.secondary, row=2)
-    async def gcash_text(self, interaction, button):
-        await self.edit(interaction, "gcash_text", "gcash text (+ image link for qr)", multiline=True)
+    @discord.ui.button(label="terms button", style=discord.ButtonStyle.secondary, row=2)
+    async def terms_button(self, interaction, button):
+        await self.edit(interaction, "terms_button", "terms button label", limit=LABEL_LIMIT)
+
+    @discord.ui.button(label="payment methods", style=discord.ButtonStyle.secondary, row=3)
+    async def payment_methods(self, interaction, button):
+        await interaction.response.send_modal(PaymentMethodsModal(self))
 
 
 class Confirmation(commands.Cog):
