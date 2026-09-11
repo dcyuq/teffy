@@ -31,6 +31,7 @@ MAX_QUESTIONS = 5
 MAX_STAFF_ROLES = 10
 MAX_OPEN_PER_USER = 5
 ORDER_OVERRIDE_CALLBACK = globals().get("ORDER_OVERRIDE_CALLBACK")
+TICKET_VIEW_CALLBACK = globals().get("TICKET_VIEW_CALLBACK")
 TICKET_CREATED_CALLBACK = globals().get("TICKET_CREATED_CALLBACK")
 
 STYLES = {
@@ -572,10 +573,30 @@ async def create_ticket(interaction, button_data, answers):
 
     mentions = " ".join(r.mention for r in roles)
     ping = f"{interaction.user.mention} {mentions}".strip()
-    await channel.send(
-        view=TicketControlView(
-            ping, heading, welcome, detail, settings["panel"]["color"]
-        ),
+    opening_view = TicketControlView(
+        ping, heading, welcome, detail, settings["panel"]["color"]
+    )
+    view_callback = TICKET_VIEW_CALLBACK
+    if view_callback is not None:
+        try:
+            custom_view = await view_callback(
+                interaction,
+                button_data,
+                answers,
+                channel,
+                ping,
+                heading,
+                welcome,
+                detail,
+                settings["panel"]["color"],
+            )
+            if custom_view is not None:
+                opening_view = custom_view
+        except Exception:
+            log.exception("Ticket opening view callback failed for %s", channel.id)
+
+    opening_message = await channel.send(
+        view=opening_view,
         allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
     )
 
@@ -602,7 +623,7 @@ async def create_ticket(interaction, button_data, answers):
     callback = TICKET_CREATED_CALLBACK
     if callback is not None:
         try:
-            await callback(interaction, button_data, answers, channel)
+            await callback(interaction, button_data, answers, channel, opening_message)
         except Exception:
             log.exception("Ticket-created callback failed for %s", channel.id)
 

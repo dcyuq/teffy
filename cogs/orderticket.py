@@ -250,79 +250,6 @@ class OrderTicketView(discord.ui.LayoutView):
         self.add_item(OrderConfirmRow(order, author_id, guild))
 
 
-async def find_opening_message(channel):
-    message_id = getattr(channel, "last_message_id", None)
-    if message_id:
-        try:
-            return await channel.fetch_message(message_id)
-        except (discord.HTTPException, discord.NotFound):
-            pass
-    try:
-        async for message in channel.history(limit=10):
-            if message.author.id == channel.guild.me.id:
-                return message
-    except (discord.HTTPException, discord.Forbidden, AttributeError):
-        return None
-    return None
-
-
-async def customize_ticket(interaction, button_data, order, before):
-    candidates = []
-    for channel_id, entry in ticket.tickets.items():
-        if channel_id in before:
-            continue
-        if entry.get("guild_id") != interaction.guild.id:
-            continue
-        if entry.get("opener_id") != interaction.user.id:
-            continue
-        candidates.append((entry.get("opened_at", 0), channel_id, entry))
-    if not candidates:
-        return
-    _, channel_id, entry = max(candidates)
-    channel = interaction.guild.get_channel(channel_id)
-    if channel is None:
-        return
-    settings = ticket.get_config(interaction.guild.id) or {}
-    panel = settings.get("panel") or {}
-    roles = ticket.staff_roles(interaction.guild, settings)
-    mentions = " ".join(role.mention for role in roles)
-    ping = f"{interaction.user.mention} {mentions}".strip()
-    heading = f"Ticket {entry.get('number', 0):04d} - {button_data['label']}"
-    receipt = render_receipt(
-        order,
-        interaction.user,
-        interaction.guild,
-    )
-    view = build_order_view(
-        ping,
-        heading,
-        button_data.get("welcome") or ticket.DEFAULT_BUTTON["welcome"],
-        receipt,
-        panel.get("color"),
-        order,
-        interaction.user.id,
-        interaction.guild,
-    )
-    message = await find_opening_message(channel)
-    try:
-        if message is not None:
-            await message.edit(view=view)
-        else:
-            message = await channel.send(
-                view=view,
-                allowed_mentions=discord.AllowedMentions(
-                    users=True,
-                    roles=roles or False,
-                ),
-            )
-        entry["order_data"] = order
-        entry["order_button_key"] = button_data["key"]
-        entry["order_message_id"] = message.id
-        ticket.save_tickets()
-    except (discord.HTTPException, discord.Forbidden):
-        log.exception("Unable to customize order ticket %s", channel_id)
-
-
 def build_order_view(ping, heading, welcome, receipt, color, order, author_id, guild):
     return OrderTicketView(
         ping,
@@ -482,7 +409,38 @@ async def order_override(interaction, button_data):
     return False
 
 
-async def order_ticket_created(interaction, button_data, answers, channel):
+async def order_ticket_view(
+    interaction,
+    button_data,
+    answers,
+    channel,
+    ping,
+    heading,
+    welcome,
+    detail,
+    color,
+):
+    settings = settings_for(interaction.guild.id)
+    if (
+        settings.get("button_key") != button_data.get("key")
+        and not button_data.get("order_enabled")
+    ):
+        return None
+    order = order_from_values({}, answers, interaction.user)
+    receipt = render_receipt(order, interaction.user, interaction.guild)
+    return build_order_view(
+        ping,
+        heading,
+        welcome,
+        receipt,
+        color,
+        order,
+        interaction.user.id,
+        interaction.guild,
+    )
+
+
+async def order_ticket_created(interaction, button_data, answers, channel, message):
     settings = settings_for(interaction.guild.id)
     if (
         settings.get("button_key") != button_data.get("key")
@@ -490,9 +448,13 @@ async def order_ticket_created(interaction, button_data, answers, channel):
     ):
         return
     order = order_from_values({}, answers, interaction.user)
-    before = set(ticket.tickets.keys())
-    before.discard(channel.id)
-    await customize_ticket(interaction, button_data, order, before)
+    entry = ticket.tickets.get(channel.id)
+    if entry is None:
+        return
+    entry["order_data"] = order
+    entry["order_button_key"] = button_data["key"]
+    entry["order_message_id"] = message.id
+    ticket.save_tickets()
 
 
 def patch_confirmation_setup():
@@ -510,6 +472,7 @@ def patch_confirmation_setup():
 
 
 patch_confirmation_setup()
+ticket.TICKET_VIEW_CALLBACK = order_ticket_view
 ticket.TICKET_CREATED_CALLBACK = order_ticket_created
 for guild_id in list(config):
     sync_ticket_override(int(guild_id))
