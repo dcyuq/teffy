@@ -253,16 +253,17 @@ class ConfirmView(discord.ui.LayoutView):
         self.add_item(box)
 
     async def confirm(self, interaction):
-        # Advance the existing confirmation message to Terms & Conditions.
-        # This keeps the flow public in the ticket channel.
+        # Keep the order confirmation message intact and send Terms & Conditions
+        # as a new public message in the ticket channel.
         settings = self.settings
-        await interaction.response.edit_message(
+        await interaction.response.send_message(
             view=TermsView(
                 settings=settings,
                 order=self.order,
                 author_id=self.author_id,
                 guild=interaction.guild,
-            )
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
@@ -305,8 +306,13 @@ class TermsView(discord.ui.LayoutView):
         self.add_item(box)
 
     async def agree(self, interaction):
+        # Keep Terms & Conditions intact and send payment options as a new
+        # public message in the ticket channel.
         view = PaymentView(self.settings, self.order, self.author_id, interaction.guild)
-        await interaction.response.edit_message(view=view)
+        await interaction.response.send_message(
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class PaymentMethodRow(discord.ui.ActionRow):
@@ -374,9 +380,9 @@ class PaymentView(discord.ui.LayoutView):
             interaction.guild,
             method,
         )
-        # Replace the public payment-options message with the selected
-        # payment details so everyone in the ticket can see the selection.
-        await interaction.response.edit_message(
+        # Keep the payment-options message intact and send the selected
+        # payment method as a new public message in the ticket channel.
+        await interaction.response.send_message(
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )

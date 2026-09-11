@@ -1146,16 +1146,18 @@ class TicketConfirmButton(discord.ui.Button):
         self.author_id = author_id
 
     async def callback(self, interaction):
-        # This button is already the order confirmation inside the ticket.
-        # Advance the existing public ticket message directly to Terms & Conditions
-        # instead of creating another confirmation prompt or an ephemeral message.
+        # Keep the original order confirmation message intact.
+        # Send Terms & Conditions as a new public message in the ticket.
         view = confirmation.TermsView(
             settings=self.settings,
             order=self.order,
             author_id=self.author_id,
             guild=interaction.guild,
         )
-        await interaction.response.edit_message(view=view)
+        await interaction.response.send_message(
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 def confirmation_order(answers):
     order = {"item": "", "price": "", "quantity": "", "notes": ""}
