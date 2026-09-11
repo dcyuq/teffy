@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
  
 import embeds
-import confirmation
+from . import confirmation
 from prefixes import display_prefix
 import emojiutils
 from storage import Store, IntKeyStore
@@ -1146,11 +1146,16 @@ class TicketConfirmButton(discord.ui.Button):
         self.author_id = author_id
 
     async def callback(self, interaction):
-        view = confirmation.ConfirmView(self.settings, self.order, self.author_id, interaction.guild)
-        await interaction.response.send_message(
-            view=view, ephemeral=True,
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+        # This button is already the order confirmation inside the ticket.
+        # Advance the existing public ticket message directly to Terms & Conditions
+        # instead of creating another confirmation prompt or an ephemeral message.
+        view = confirmation.TermsView(
+            settings=self.settings,
+            order=self.order,
+            author_id=self.author_id,
+            guild=interaction.guild,
         )
+        await interaction.response.edit_message(view=view)
 
 def confirmation_order(answers):
     order = {"item": "", "price": "", "quantity": "", "notes": ""}

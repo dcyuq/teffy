@@ -253,43 +253,17 @@ class ConfirmView(discord.ui.LayoutView):
         self.add_item(box)
 
     async def confirm(self, interaction):
-
-
-        # Advance directly to Terms & Conditions.
-
-
-        # Do not invoke /confirmation or recreate the confirmation message.
-
-
+        # Advance the existing confirmation message to Terms & Conditions.
+        # This keeps the flow public in the ticket channel.
         settings = self.settings
-
-
-        await interaction.response.send_message(
-
-
+        await interaction.response.edit_message(
             view=TermsView(
-
-
                 settings=settings,
-
-
                 order=self.order,
-
-
                 author_id=self.author_id,
-
-
                 guild=interaction.guild,
-
-
-            ),
-
-
-            ephemeral=True,
-
-
+            )
         )
-
 
 
 class TermsRow(discord.ui.ActionRow):
@@ -400,7 +374,9 @@ class PaymentView(discord.ui.LayoutView):
             interaction.guild,
             method,
         )
-        await interaction.response.send_message(
+        # Replace the public payment-options message with the selected
+        # payment details so everyone in the ticket can see the selection.
+        await interaction.response.edit_message(
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
