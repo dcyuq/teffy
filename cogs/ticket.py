@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
  
 import embeds
-from . import confirmation
+import confirmation
 from prefixes import display_prefix
 import emojiutils
 from storage import Store, IntKeyStore
