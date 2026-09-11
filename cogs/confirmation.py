@@ -429,61 +429,251 @@ class FieldModal(discord.ui.Modal):
         await self.panel.refresh()
 
 
-class PaymentMethodsModal(discord.ui.Modal):
-    def __init__(self, panel):
-        super().__init__(title="payment methods")
+class PaymentMethodModal(discord.ui.Modal):
+    def __init__(self, panel, existing=None):
         self.panel = panel
+        self.existing = existing
 
-        methods = panel.settings.get("payment_methods") or []
-        lines = []
-        for method in methods:
-            label = (method.get("label") or method.get("id") or "payment").replace("|", "/")
-            body = (method.get("text") or "").replace("\n", "\\n").replace("|", "/")
-            lines.append(f"{label} | {body}")
-
-        self.methods_input = discord.ui.TextInput(
-            label="methods",
-            style=discord.TextStyle.paragraph,
-            default="\n".join(lines)[:4000],
-            placeholder="One method per line: label | details. Use \\n for line breaks.",
-            max_length=4000,
-            required=False,
+        super().__init__(
+            title="edit payment method" if existing else "add payment method"
         )
-        self.add_item(self.methods_input)
+
+        self.name_input = discord.ui.TextInput(
+            label="payment method",
+            default=(existing or {}).get("label", "")[:LABEL_LIMIT],
+            placeholder="e.g. gcash, maya, bank transfer",
+            max_length=LABEL_LIMIT,
+            required=True,
+        )
+
+        self.display_input = discord.ui.TextInput(
+            label="what should be displayed",
+            default=(existing or {}).get("text", "")[:4000],
+            placeholder="Enter the payment information/layout to display.",
+            style=discord.TextStyle.paragraph,
+            max_length=4000,
+            required=True,
+        )
+
+        self.add_item(self.name_input)
+        self.add_item(self.display_input)
 
     async def on_submit(self, interaction):
-        methods = []
-        raw = self.methods_input.value.strip()
+        label = self.name_input.value.strip()
+        text = self.display_input.value.strip()
 
-        if raw:
-            for index, line in enumerate(raw.splitlines(), start=1):
-                if not line.strip():
-                    continue
-                label, separator, body = line.partition("|")
-                label = label.strip()
-                body = body.strip().replace("\\n", "\n")
+        if not label or not text:
+            await interaction.response.send_message(
+                embed=embeds.error("both fields are required."),
+                ephemeral=True,
+            )
+            return
 
-                if not separator or not label:
-                    await interaction.response.send_message(
-                        embed=embeds.error(
-                            f"invalid payment method on line {index}. "
-                            "use `label | details`."
-                        ),
-                        ephemeral=True,
-                    )
-                    return
+        methods = self.panel.settings.get("payment_methods") or []
 
-                method_id = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or f"payment-{index}"
-                methods.append({
-                    "id": method_id,
-                    "label": label[:LABEL_LIMIT],
-                    "text": body[:4000],
-                })
+        if self.existing is None:
+            if len(methods) >= 25:
+                await interaction.response.send_message(
+                    embed=embeds.error("you already have 25 payment methods."),
+                    ephemeral=True,
+                )
+                return
+
+            method_id = (
+                re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+                or f"payment-{len(methods) + 1}"
+            )
+
+            # Keep IDs unique even if two methods have similar names.
+            existing_ids = {method.get("id") for method in methods}
+            base_id = method_id
+            counter = 2
+            while method_id in existing_ids:
+                method_id = f"{base_id}-{counter}"
+                counter += 1
+
+            methods.append({
+                "id": method_id,
+                "label": label[:LABEL_LIMIT],
+                "text": text[:4000],
+            })
+        else:
+            self.existing["label"] = label[:LABEL_LIMIT]
+            self.existing["text"] = text[:4000]
 
         self.panel.settings["payment_methods"] = methods
         save_config()
-        await interaction.response.defer()
-        await self.panel.refresh()
+
+        await interaction.response.edit_message(
+            embed=self.panel.status_embed(),
+            view=PaymentMethodsView(self.panel),
+        )
+
+
+class PaymentMethodSelect(discord.ui.Select):
+    def __init__(self, panel):
+        self.panel = panel
+        methods = panel.settings.get("payment_methods") or []
+
+        options = [
+            discord.SelectOption(
+                label=method.get("label", "payment")[:100],
+                value=method.get("id", str(index)),
+                description="click to customize this payment method"[:100],
+            )
+            for index, method in enumerate(methods)
+        ]
+
+        if not options:
+            options = [
+                discord.SelectOption(
+                    label="no payment methods yet",
+                    value="none",
+                    description="use Add Payment Method below",
+                )
+            ]
+
+        super().__init__(
+            placeholder="choose a payment method to customize",
+            options=options[:25],
+            disabled=not methods,
+        )
+
+    async def callback(self, interaction):
+        method_id = self.values[0]
+        method = next(
+            (
+                method
+                for method in (self.panel.settings.get("payment_methods") or [])
+                if method.get("id") == method_id
+            ),
+            None,
+        )
+
+        if method is None:
+            await interaction.response.send_message(
+                embed=embeds.error("that payment method no longer exists."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            PaymentMethodModal(self.panel, method)
+        )
+
+
+class PaymentMethodsView(discord.ui.View):
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.add_item(PaymentMethodSelect(panel))
+
+    def status_embed(self):
+        methods = self.panel.settings.get("payment_methods") or []
+
+        if methods:
+            lines = [
+                f"**{method.get('label', 'payment')}**"
+                for method in methods
+            ]
+            description = (
+                "select a payment method below to customize it.\n\n"
+                + "\n".join(lines)
+            )
+        else:
+            description = (
+                "no payment methods have been added yet.\n\n"
+                "click **add payment method** to create one."
+            )
+
+        return embeds.build(
+            f"**payment methods**\n\n{description}"[:4096]
+        )
+
+    @discord.ui.button(
+        label="add payment method",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def add_payment_method(self, interaction, button):
+        methods = self.panel.settings.get("payment_methods") or []
+
+        if len(methods) >= 25:
+            await interaction.response.send_message(
+                embed=embeds.error("you already have 25 payment methods."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            PaymentMethodModal(self.panel)
+        )
+
+    @discord.ui.button(
+        label="remove payment method",
+        style=discord.ButtonStyle.danger,
+        row=1,
+    )
+    async def remove_payment_method(self, interaction, button):
+        methods = self.panel.settings.get("payment_methods") or []
+
+        if not methods:
+            await interaction.response.send_message(
+                embed=embeds.error("there are no payment methods to remove."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            RemovePaymentMethodModal(self.panel)
+        )
+
+
+class RemovePaymentMethodModal(discord.ui.Modal):
+    def __init__(self, panel):
+        super().__init__(title="remove payment method")
+        self.panel = panel
+
+        methods = panel.settings.get("payment_methods") or []
+        self.name_input = discord.ui.TextInput(
+            label="payment method name",
+            placeholder="enter the exact payment method name",
+            max_length=LABEL_LIMIT,
+            required=True,
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction):
+        target = self.name_input.value.strip().lower()
+        methods = self.panel.settings.get("payment_methods") or []
+
+        remaining = [
+            method
+            for method in methods
+            if (method.get("label") or "").strip().lower() != target
+        ]
+
+        if len(remaining) == len(methods):
+            await interaction.response.send_message(
+                embed=embeds.error("payment method not found."),
+                ephemeral=True,
+            )
+            return
+
+        self.panel.settings["payment_methods"] = remaining
+        save_config()
+
+        await interaction.response.edit_message(
+            embed=self.panel.status_embed(),
+            view=self,
+        )
+
+
+class PaymentMethodsModal:
+    """Compatibility shim for older code that may import this name."""
+
+    def __init__(self, panel):
+        self.panel = panel
 
 
 class SetupView(discord.ui.View):
@@ -573,7 +763,12 @@ class SetupView(discord.ui.View):
 
     @discord.ui.button(label="payment methods", style=discord.ButtonStyle.secondary, row=3)
     async def payment_methods(self, interaction, button):
-        await interaction.response.send_modal(PaymentMethodsModal(self))
+        view = PaymentMethodsView(self)
+        await interaction.response.send_message(
+            embed=view.status_embed(),
+            view=view,
+            ephemeral=True,
+        )
 
 
 class Confirmation(commands.Cog):
