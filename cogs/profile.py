@@ -9,15 +9,17 @@ class BotProfile(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def is_owner(self, interaction: discord.Interaction) -> bool:
-        return await self.bot.is_owner(interaction.user)
+    async def is_server_owner(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            return False
+        return interaction.user.id == interaction.guild.owner_id
 
     @app_commands.command(name="setavatar", description="Changes the bot's profile picture using an image URL.")
     @app_commands.describe(url="The direct URL to the image (.png, .jpg, or .gif)")
     async def setavatar(self, interaction: discord.Interaction, url: str):
-        if not await self.is_owner(interaction):
+        if not await self.is_server_owner(interaction):
             return await interaction.response.send_message(
-                embed=embeds.error("Only the bot owner can use this command.", title="Permission Denied"), 
+                embed=embeds.error("Only the server owner can use this command.", title="Permission Denied"), 
                 ephemeral=True
             )
 
@@ -50,9 +52,9 @@ class BotProfile(commands.Cog):
     @app_commands.command(name="setbanner", description="Changes the bot's profile banner using an image URL.")
     @app_commands.describe(url="The direct URL to the image (.png, .jpg, or .gif)")
     async def setbanner(self, interaction: discord.Interaction, url: str):
-        if not await self.is_owner(interaction):
+        if not await self.is_server_owner(interaction):
             return await interaction.response.send_message(
-                embed=embeds.error("Only the bot owner can use this command.", title="Permission Denied"), 
+                embed=embeds.error("Only the server owner can use this command.", title="Permission Denied"), 
                 ephemeral=True
             )
 
@@ -95,9 +97,9 @@ class BotProfile(commands.Cog):
         app_commands.Choice(name="Clear (Remove Status)", value="clear"),
     ])
     async def setstatus(self, interaction: discord.Interaction, activity_type: app_commands.Choice[str], status_message: str = None):
-        if not await self.is_owner(interaction):
+        if not await self.is_server_owner(interaction):
             return await interaction.response.send_message(
-                embed=embeds.error("Only the bot owner can use this command.", title="Permission Denied"), 
+                embed=embeds.error("Only the server owner can use this command.", title="Permission Denied"), 
                 ephemeral=True
             )
 
@@ -135,9 +137,9 @@ class BotProfile(commands.Cog):
     @app_commands.command(name="setusername", description="Changes the bot's global username.")
     @app_commands.describe(new_name="The new username for the bot")
     async def setusername(self, interaction: discord.Interaction, new_name: str):
-        if not await self.is_owner(interaction):
+        if not await self.is_server_owner(interaction):
             return await interaction.response.send_message(
-                embed=embeds.error("Only the bot owner can use this command.", title="Permission Denied"), 
+                embed=embeds.error("Only the server owner can use this command.", title="Permission Denied"), 
                 ephemeral=True
             )
 
