@@ -3,7 +3,6 @@ import datetime
 import logging
 import re
 import time
-import unicodedata
 import uuid
 
 import discord
@@ -29,8 +28,8 @@ MAX_STATUSES = 8
 MENU_LIMIT = 25
 TEMPLATE_LIMIT = 3800
 
-PAD = "ㅤ"
-JOINER = "⁠"
+PAD = "\u3164"
+JOINER = "\u2060"
 
 DEFAULT_TEMPLATE = (
     "order for {user}\n"
@@ -182,66 +181,8 @@ def in_menu(entry):
 def menu_statuses(settings):
     return [s for s in statuses_of(settings) if in_menu(s)][:MENU_LIMIT]
 
-DIGIT_WORDS = {
-    "ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3", "FOUR": "4",
-    "FIVE": "5", "SIX": "6", "SEVEN": "7", "EIGHT": "8", "NINE": "9",
-}
-
-LOOKALIKE = {
-    "\u1950": "t", "\u1952": "n", "\u1953": "c", "\u1955": "d",
-    "\u1957": "p", "\u195b": "s", "\u195d": "h", "\u1960": "l",
-    "\u1963": "w", "\u1968": "y", "\u1969": "u", "\u196a": "v",
-    "\u1970": "l", "\u1972": "e", "\u1973": "o", "\u1974": "c",
-    "\u1954": "s", "\u1961": "c",
-    "\u1a00": "o", "\u1a05": "d", "\u1a08": "n", "\u1a14": "s",
-    "\u1962": "f", "\u183b": "f",
-    "\u19b2": "a", "\u19b4": "e", "\u19b5": "u", "\u19b6": "o",
-    "\u1990": "n", "\u1991": "s", "\u1992": "m", "\u1993": "n",
-    "\u1994": "d", "\u1996": "a", "\u199d": "w", "\u199c": "v",
-    "\u19ae": "o", "\u19ac": "y", "\u19ee": "e", "\uaa8e": "s",
-    "\uaa80": "n",
-    "\uaa91": "m", "\uaa8a": "u", "\uaa96": "a", "\uaa9d": "w",
-    "\uaa9c": "v", "\uaaae": "o", "\uaaac": "y", "\uaac0": "e",
-    "\uaabb": "t", "\uaab6": "o", "\u1d0f": "o", "\u0261": "g",
-}
-
-NAME_LETTER = re.compile(r"\bLETTER ([A-Z])\b")
-
-def fold_char(ch):
-    if ch.isascii():
-        return ch
-
-    swap = LOOKALIKE.get(ch)
-    if swap:
-        return swap
-
-    plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
-    if plain:
-        return plain
-
-    try:
-        name = unicodedata.name(ch)
-    except ValueError:
-        return ""
-
-    parts = name.split()
-    tail = parts[-1]
-    if len(tail) == 1 and tail.isalpha():
-        return tail.lower() if "SMALL" in parts else tail
-
-    found = NAME_LETTER.search(name)
-    if found:
-        return found.group(1).lower() if "SMALL" in parts else found.group(1)
-
-    if "DIGIT" in parts and tail in DIGIT_WORDS:
-        return DIGIT_WORDS[tail]
-    return ""
-
-def fold(text):
-    return "".join(fold_char(ch) for ch in text or "")
-
 def slug(text, taken):
-    base = re.sub(r"[^a-z0-9]+", "-", fold(text).strip().lower()).strip("-")
+    base = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
     base = base[:20] or uuid.uuid4().hex[:6]
     candidate, n = base, 2
     while candidate in taken:
@@ -269,25 +210,22 @@ def valid_link(url):
         ("http://", "https://", "discord://")
     )
 
-def link_row(*specs):
-    row = discord.ui.ActionRow()
-    for label, emoji, url in specs:
-        if not url:
-            continue
-        label = (label or "").strip() or None
-        partial = emojiutils.to_partial(emoji)
-        if label is None and partial is None:
-            continue
-        row.add_item(discord.ui.Button(url=url, label=label, emoji=partial))
-    return row
+def add_link(view, label, emoji, url):
+    if not url:
+        return
+    label = (label or "").strip() or None
+    partial = emojiutils.to_partial(emoji)
+    if label is None and partial is None:
+        return
+    view.add_item(discord.ui.Button(url=url, label=label, emoji=partial))
 
-def notify_row(settings, jump_url):
-    return link_row(
-        (settings.get("notify_jump_label", "view order"),
-         settings.get("notify_jump_emoji"), jump_url),
-        (settings.get("notify_link_label"),
-         settings.get("notify_link_emoji"), settings.get("notify_link_url")),
-    )
+def notify_view(settings, jump_url):
+    view = discord.ui.View(timeout=None)
+    add_link(view, settings.get("notify_jump_label", "view order"),
+             settings.get("notify_jump_emoji"), jump_url)
+    add_link(view, settings.get("notify_link_label"),
+             settings.get("notify_link_emoji"), settings.get("notify_link_url"))
+    return view if view.children else None
 
 def stamp_values(guild, order):
     stamp = int(order.get("created_at") or 0)
@@ -354,7 +292,7 @@ def order_text(guild, settings, order):
         if member:
             body = f"{body}\n-# last updated by {member.display_name}"
     body = body.strip()
-    return body[:2000] if body else "​"
+    return body[:2000] if body else "\u200b"
 
 def can_update(member, order):
     return (
@@ -362,8 +300,22 @@ def can_update(member, order):
         or member.guild_permissions.manage_messages
     )
 
-def channel_name_for(status_text, opener):
-    name = re.sub(r"[^a-z0-9]+", "-", fold(f"{status_text}-{opener}").lower()).strip("-")
+NAME_JOINER = "\uff0e"
+
+def slug_part(text):
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+def slug_name(text):
+    return re.sub(r"[^a-z0-9._-]+", "", (text or "").lower()).strip("-")
+
+def channel_name_for(quantity, status_text, item, opener):
+    parts = [
+        slug_part(quantity),
+        slug_part(status_text),
+        slug_part(item),
+        slug_name(opener),
+    ]
+    name = NAME_JOINER.join(p for p in parts if p)
     return name[:100] or "ticket"
 
 async def rename_source(guild, settings, order):
@@ -374,7 +326,9 @@ async def rename_source(guild, settings, order):
     if channel is None:
         return
     name = channel_name_for(
+        order.get("quantity") or "",
         status_label(settings, order["status"]),
+        order.get("item") or "",
         order.get("opener_name") or "user",
     )
     if channel.name == name:
@@ -391,11 +345,11 @@ def schedule_rename(guild, settings, order):
     _rename_tasks.add(task)
     task.add_done_callback(_rename_tasks.discard)
 
-def completed_row(settings):
-    return link_row(
-        (settings.get("vouch_label", "vouch"),
-         settings.get("vouch_emoji"), settings.get("vouch_url")),
-    )
+def completed_view(settings):
+    view = discord.ui.View(timeout=None)
+    add_link(view, settings.get("vouch_label", "vouch"),
+             settings.get("vouch_emoji"), settings.get("vouch_url"))
+    return view if view.children else None
 
 async def send_completed(guild, settings, order):
     if order.get("completed_sent"):
@@ -413,10 +367,10 @@ async def send_completed(guild, settings, order):
     ).strip()
     if not text:
         return
-    ping = f"<@{order['user_id']}>" if settings.get("ping", True) else None
     try:
         await channel.send(
-            view=CardView(ping, text, completed_row(settings)),
+            content=text[:2000],
+            view=completed_view(settings),
             allowed_mentions=discord.AllowedMentions(
                 everyone=False, roles=False, users=settings.get("ping", True)
             ),
@@ -485,62 +439,22 @@ class StatusSelect(discord.ui.Select):
 
         order["status"] = chosen
         order["updated_by"] = interaction.user.id
-        if chosen != (settings.get("completed_status") or "done"):
-            order["completed_sent"] = False
         save_orders()
 
-        ping, body = queue_payload(interaction.guild, settings, order)
         await interaction.response.edit_message(
-            content=None,
+            content=order_text(interaction.guild, settings, order),
             embed=None,
-            view=QueueView(settings, chosen, ping, body),
+            view=QueueView(settings, chosen),
         )
 
         await send_completed(interaction.guild, settings, order)
         schedule_rename(interaction.guild, settings, order)
 
-class CardView(discord.ui.LayoutView):
-    def __init__(self, ping, body, row=None):
-        super().__init__(timeout=None)
-        if ping:
-            self.add_item(discord.ui.TextDisplay(ping))
-        container = discord.ui.Container()
-        text, image_url = split_image(body)
-        if text:
-            container.add_item(discord.ui.TextDisplay(text[:4000]))
-        if image_url:
-            container.add_item(
-                discord.ui.MediaGallery(discord.MediaGalleryItem(image_url))
-            )
-        self.add_item(container)
-        if row is not None and row.children:
-            self.add_item(row)
+class QueueView(discord.ui.View):
 
-class QueueControls(discord.ui.ActionRow):
     def __init__(self, settings, current=None):
-        super().__init__()
-        self.add_item(StatusSelect(settings, current))
-
-class QueueView(discord.ui.LayoutView):
-
-    def __init__(self, settings, current=None, ping=None, body=None):
         super().__init__(timeout=None)
-        if ping:
-            self.add_item(discord.ui.TextDisplay(ping))
-        if body:
-            container = discord.ui.Container()
-            text, image_url = split_image(body)
-            if text:
-                container.add_item(discord.ui.TextDisplay(text[:4000]))
-            if image_url:
-                container.add_item(
-                    discord.ui.MediaGallery(discord.MediaGalleryItem(image_url))
-                )
-            self.add_item(container)
-        self.add_item(QueueControls(settings, current))
-
-def queue_payload(guild, settings, order):
-    return None, order_text(guild, settings, order)
+        self.add_item(StatusSelect(settings, current))
 
 class TemplateModal(discord.ui.Modal, title="Queue Format"):
     def __init__(self, builder):
@@ -1280,13 +1194,13 @@ class ConfirmView(discord.ui.View):
         ping = self.settings.get("ping", True)
 
         try:
-            mention, body = queue_payload(
-                interaction.guild, self.settings, self.order
-            )
+            body = order_text(interaction.guild, self.settings, self.order)
+            mention = f"<@{self.order['user_id']}>"
+            if ping and mention not in body:
+                body = f"{mention}\n{body}"[:2000]
             sent = await channel.send(
-                view=QueueView(
-                    self.settings, self.order["status"], mention, body
-                ),
+                content=body,
+                view=QueueView(self.settings, self.order["status"]),
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=ping
                 ),
@@ -1318,11 +1232,8 @@ class ConfirmView(discord.ui.View):
         if notify:
             try:
                 await self.ctx.channel.send(
-                    view=CardView(
-                        f"<@{self.order['user_id']}>" if ping else None,
-                        notify,
-                        notify_row(self.settings, sent.jump_url),
-                    ),
+                    content=notify[:2000],
+                    view=notify_view(self.settings, sent.jump_url),
                     allowed_mentions=discord.AllowedMentions(
                         everyone=False, roles=False, users=ping
                     ),
@@ -1437,7 +1348,7 @@ class Queue(commands.Cog):
             "status": initial_status(settings),
             "updated_by": None,
             "source_channel_id": ctx.channel.id,
-            "opener_name": user.display_name,
+            "opener_name": user.name,
         }
 
         view = ConfirmView(ctx, settings, order)
@@ -1504,18 +1415,15 @@ class Queue(commands.Cog):
 
         order["status"] = entry["key"]
         order["updated_by"] = ctx.author.id
-        if entry["key"] != (settings.get("completed_status") or "done"):
-            order["completed_sent"] = False
         save_orders()
 
         channel = ctx.guild.get_channel(settings.get("channel_id")) or ctx.channel
         try:
             target = await channel.fetch_message(int(raw))
-            ping, body = queue_payload(ctx.guild, settings, order)
             await target.edit(
-                content=None,
+                content=order_text(ctx.guild, settings, order),
                 embed=None,
-                view=QueueView(settings, entry["key"], ping, body),
+                view=QueueView(settings, entry["key"]),
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
