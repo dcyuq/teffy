@@ -366,30 +366,48 @@ def channel_name_for(status_text, opener):
     name = re.sub(r"[^a-z0-9]+", "-", fold(f"{status_text}-{opener}").lower()).strip("-")
     return name[:100] or "ticket"
 
-async def rename_source(guild, settings, order):
+def status_category(guild, settings, key):
+    entry = find_status(settings, key) or {}
+    category = guild.get_channel(entry.get("category_id") or 0)
+    return category if isinstance(category, discord.CategoryChannel) else None
+
+_arrange_locks = {}
+
+async def arrange_source(guild, settings, order):
     channel_id = order.get("source_channel_id")
     if not channel_id:
         return
-    channel = guild.get_channel(channel_id)
-    if channel is None:
-        return
-    name = channel_name_for(
-        status_label(settings, order["status"]),
-        order.get("opener_name") or "user",
-    )
-    if channel.name == name:
-        return
-    try:
-        await channel.edit(name=name, reason="queue status")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
+    lock = _arrange_locks.setdefault(channel_id, asyncio.Lock())
+    async with lock:
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            _arrange_locks.pop(channel_id, None)
+            return
 
-_rename_tasks = set()
+        category = status_category(guild, settings, order["status"])
+        if category is not None and channel.category_id != category.id:
+            try:
+                await channel.edit(category=category, reason="queue status")
+            except (discord.Forbidden, discord.HTTPException):
+                log.warning("could not move %s into %s", channel.id, category.id)
 
-def schedule_rename(guild, settings, order):
-    task = asyncio.create_task(rename_source(guild, settings, order))
-    _rename_tasks.add(task)
-    task.add_done_callback(_rename_tasks.discard)
+        name = channel_name_for(
+            status_label(settings, order["status"]),
+            order.get("opener_name") or "user",
+        )
+        if channel.name == name:
+            return
+        try:
+            await channel.edit(name=name, reason="queue status")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+_arrange_tasks = set()
+
+def schedule_arrange(guild, settings, order):
+    task = asyncio.create_task(arrange_source(guild, settings, order))
+    _arrange_tasks.add(task)
+    task.add_done_callback(_arrange_tasks.discard)
 
 def completed_row(settings):
     return link_row(
@@ -497,7 +515,7 @@ class StatusSelect(discord.ui.Select):
         )
 
         await send_completed(interaction.guild, settings, order)
-        schedule_rename(interaction.guild, settings, order)
+        schedule_arrange(interaction.guild, settings, order)
 
 class CardView(discord.ui.LayoutView):
     def __init__(self, ping, body, row=None):
@@ -882,11 +900,34 @@ class StatusModal(discord.ui.Modal, title="Status"):
         save_config()
         await self.builder.refresh()
 
+class StatusCategorySelect(discord.ui.ChannelSelect):
+    def __init__(self, manage):
+        self.manage = manage
+        current = manage.entry.get("category_id")
+        super().__init__(
+            channel_types=[discord.ChannelType.category],
+            placeholder="Move orders here (clear it for no move)",
+            min_values=0,
+            max_values=1,
+            default_values=[discord.Object(id=current)] if current else [],
+            row=0,
+        )
+
+    async def callback(self, interaction):
+        self.manage.entry["category_id"] = self.values[0].id if self.values else None
+        save_config()
+        refreshed = StatusManageView(self.manage.builder, self.manage.entry)
+        await interaction.response.edit_message(
+            embed=refreshed.summary(), view=refreshed
+        )
+        await self.manage.builder.refresh()
+
 class StatusManageView(discord.ui.View):
     def __init__(self, builder, entry):
         super().__init__(timeout=300)
         self.builder = builder
         self.entry = entry
+        self.add_item(StatusCategorySelect(self))
 
     async def interaction_check(self, interaction):
         return interaction.user.id == self.builder.ctx.author.id
@@ -894,8 +935,10 @@ class StatusManageView(discord.ui.View):
     def summary(self):
         settings = self.builder.settings
         first = statuses_of(settings)[0]["key"] == self.entry["key"]
+        category = self.builder.ctx.guild.get_channel(self.entry.get("category_id") or 0)
 
         return embeds.build(
+            f"**Moves to** - {category.name if category else 'stays put'}\n"
             f"**Icon** - {self.entry.get('emoji') or 'none'}\n"
             f"**Description** - "
             f"{self.entry.get('description') or DEFAULT_OPTION_TEXT}\n"
@@ -1120,7 +1163,9 @@ class SetupView(discord.ui.View):
             icon = entry.get("emoji")
             shown = f"{icon} {entry['label']}" if icon else entry["label"]
             kind = "in the menu" if in_menu(entry) else "hidden"
-            lines.append(f"- {shown} ({kind})")
+            category = guild.get_channel(entry.get("category_id") or 0)
+            where = f" → {category.name}" if category else ""
+            lines.append(f"- {shown} ({kind}){where}")
 
         embed = embeds.build("\n".join(lines), title="Queue setup")
         embed.add_field(
@@ -1168,8 +1213,8 @@ class SetupView(discord.ui.View):
     async def statuses(self, interaction, button):
         await interaction.response.send_message(
             embed=embeds.notice(
-                "add a status, or pick one to change its colour, icon and "
-                "whether it gets a button."
+                "add a status, or pick one to change its icon, the category "
+                "its orders move to, and whether it shows in the menu."
             ),
             view=StatusesView(self),
             ephemeral=True,
@@ -1308,7 +1353,7 @@ class ConfirmView(discord.ui.View):
         orders[sent.id] = self.order
         save_orders()
 
-        schedule_rename(interaction.guild, self.settings, self.order)
+        schedule_arrange(interaction.guild, self.settings, self.order)
 
         values = order_values(interaction.guild, self.settings, self.order)
         values.update({"channel": channel.mention, "link": sent.jump_url})
@@ -1521,7 +1566,7 @@ class Queue(commands.Cog):
             pass
 
         await send_completed(ctx.guild, settings, order)
-        schedule_rename(ctx.guild, settings, order)
+        schedule_arrange(ctx.guild, settings, order)
 
         await embeds.send(
             ctx,
