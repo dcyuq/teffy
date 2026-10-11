@@ -212,14 +212,7 @@ def ticket_context(member, guild, channel, number, answers=None, questions=None)
         "ticket_number": str(number),
     }
     if answers:
-        context.update(confirmation.answers_to_order(questions or [], answers))
-        for label, answer in answers:
-            value = (answer or "").strip()
-            name = (label or "").strip().lower()
-            for variant in {name, name.strip("?!.:")}:
-                if variant:
-                    context.setdefault(variant, value)
-                    context.setdefault(re.sub(r"\s+", "_", variant), value)
+        context.update(confirmation_order(answers, questions))
     return context
 
 def fill(template, context):
@@ -617,7 +610,7 @@ async def ask_in_channel(client, channel, user, questions):
         return message.author.id == user.id and message.channel.id == channel.id
 
     for index, question in enumerate(questions):
-        kind = confirmation.question_kind(question, index)
+        kind = question_kind(question, index)
         notes = [f"{index + 1}/{len(questions)}"]
         if kind == "number":
             notes.append("numbers only")
@@ -658,11 +651,11 @@ async def ask_in_channel(client, channel, user, questions):
                 answers.append((question["label"], ""))
                 break
 
-            if kind == "number" and not confirmation.is_number(text):
+            if kind == "number" and not is_number(text):
                 await channel.send(
                     embed=embeds.error(
-                        f"`{question['label']}` only takes numbers. send just "
-                        "the amount, like `2` or `150`."
+                        f"**{short_label(question, index)}** only takes "
+                        "numbers. send just the amount, like `2` or `150`."
                     )
                 )
                 continue
@@ -766,7 +759,7 @@ async def create_ticket(interaction, button_data, answers):
 
     context = ticket_context(
         interaction.user, guild, channel, number, answers,
-        confirmation.questions_of(confirmation.settings_for(guild.id)),
+        form_questions(guild.id),
     )
     welcome = fill(
         button_data.get("welcome") or DEFAULT_BUTTON["welcome"], context
@@ -1382,10 +1375,7 @@ class OrderFormButton(discord.ui.Button):
             )
             return
 
-        questions = confirmation.questions_of(
-            confirmation.settings_for(interaction.guild.id)
-        )
-        self.questions = questions
+        questions = form_questions(interaction.guild.id)
 
         await interaction.response.send_message(
             embed=embeds.notice("answer each question below. type `cancel` to stop."),
@@ -1417,16 +1407,27 @@ class OrderFormButton(discord.ui.Button):
             interaction.channel,
         )
 
-        await interaction.channel.send(
-            view=TicketConfirmationView(
-                interaction.guild,
-                ping,
-                answers,
-                data["opener_id"],
-                confirmation.answers_to_order(questions, answers),
-            ),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
-        )
+        try:
+            await interaction.channel.send(
+                view=TicketConfirmationView(
+                    interaction.guild,
+                    ping,
+                    answers,
+                    data["opener_id"],
+                    confirmation_order(answers, questions),
+                ),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=roles or False
+                ),
+            )
+        except Exception:
+            log.exception("could not post the order receipt")
+            await interaction.channel.send(
+                embed=embeds.error(
+                    "your answers were saved but the receipt could not be "
+                    "posted. ping staff, the reason is in the bot log."
+                )
+            )
 
 class TicketConfirmButton(discord.ui.Button):
     def __init__(self, settings, order, author_id, guild):
@@ -1448,19 +1449,76 @@ class TicketConfirmButton(discord.ui.Button):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+ORDER_FIELDS = ("item", "price", "quantity", "notes")
+
+FALLBACK_QUESTIONS = [
+    {"label": "Item", "key": "item", "kind": "text", "required": True},
+    {"label": "Price", "key": "price", "kind": "number", "required": True},
+    {"label": "Quantity", "key": "quantity", "kind": "number", "required": True},
+    {"label": "Notes", "key": "notes", "kind": "text", "required": False},
+]
+
+def form_questions(guild_id):
+    settings = confirmation.settings_for(guild_id)
+    reader = getattr(confirmation, "questions_of", None)
+    found = reader(settings) if reader else settings.get("questions")
+    return list(found or FALLBACK_QUESTIONS)
+
+def question_variable(question, index=0):
+    key = (question.get("key") or question.get("variable") or "").strip().strip("{}")
+    key = re.sub(r"[^a-z0-9_]+", "_", key.lower()).strip("_")
+    if key:
+        return key
+    if index < len(ORDER_FIELDS):
+        return ORDER_FIELDS[index]
+    return f"q{index + 1}"
+
+def short_label(question, index=0):
+    line = (question.get("label") or "").splitlines()[0]
+    line = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", line)
+    line = re.sub(r":[A-Za-z0-9_~]+:", "", line)
+    line = re.sub(r"^\s*-#\s*", "", line)
+    line = re.sub(r"[*_`~]", "", line)
+    line = re.sub(r"\s+", " ", line).strip()
+    return line[:60] or question_variable(question, index)
+
+def question_kind(question, index=0):
+    kind = (question.get("kind") or "").strip().lower()
+    if kind in ("text", "number"):
+        return kind
+    return "number" if question_variable(question, index) in (
+        "price", "quantity", "amount", "cost", "total", "qty"
+    ) else "text"
+
+def is_number(text):
+    return bool(re.match(r"^[^\d\-]{0,3}\s*-?\d+(?:[.,]\d+)?\s*$",
+                         (text or "").replace(",", "")))
+
 def confirmation_order(answers, questions=None):
-    if questions is None:
-        questions = confirmation.DEFAULT_QUESTIONS
-    return confirmation.answers_to_order(questions, answers)
+    questions = questions or []
+    order = {field: "" for field in ORDER_FIELDS}
+
+    for index, (label, answer) in enumerate(answers):
+        value = (answer or "").strip()
+        if index < len(questions):
+            order[question_variable(questions[index], index)] = value
+        elif index < len(ORDER_FIELDS):
+            order[ORDER_FIELDS[index]] = value
+
+        name = (label or "").strip().lower()
+        for variant in {name, name.strip("?!.:")}:
+            if variant:
+                order.setdefault(variant, value)
+                order.setdefault(re.sub(r"\s+", "_", variant), value)
+
+    return order
 
 class TicketConfirmationView(discord.ui.LayoutView):
     def __init__(self, guild, ping, answers, author_id, order=None):
         super().__init__(timeout=None)
         settings = confirmation.settings_for(guild.id)
         if order is None:
-            order = confirmation_order(
-                answers, confirmation.questions_of(settings)
-            )
+            order = confirmation_order(answers, form_questions(guild.id))
         if ping:
             self.add_item(discord.ui.TextDisplay(ping[:2000]))
         container = discord.ui.Container()
@@ -1919,12 +1977,10 @@ class ButtonManageView(discord.ui.View):
         count = len(self.button_data.get("questions", []))
         if self.button_data.get("confirmation_mode"):
             mode = "Order form, asked one question at a time in the ticket"
-            questions = confirmation.questions_of(
-                confirmation.settings_for(self.builder.ctx.guild.id)
-            )
+            questions = form_questions(self.builder.ctx.guild.id)
             listed = "\n".join(
-                f"{i + 1}. {q['label'][:60]} → "
-                f"`{{{confirmation.question_key(q, i)}}}`"
+                f"{i + 1}. {q.get('label', '')[:60]} → "
+                f"`{{{question_variable(q, i)}}}`"
                 for i, q in enumerate(questions)
             )
             listed += "\n\nedit these in `confirmation setup` → order form."
