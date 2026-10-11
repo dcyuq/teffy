@@ -33,6 +33,7 @@ MAX_QUESTIONS = 5
 MAX_STAFF_ROLES = 10
 MAX_OPEN_PER_USER = 5
 FORM_TIMEOUT = 300
+ORDER_FORM_LABEL = "order form"
 CANCEL_WORDS = {"cancel", "stop", "nvm"}
 
 STYLES = {
@@ -502,15 +503,9 @@ async def send_log(guild, embed):
     except (discord.Forbidden, discord.HTTPException):
         pass
 
-async def purge(messages):
-    for message in messages:
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-            pass
+open_forms = set()
 
 async def ask_in_channel(client, channel, user, questions):
-    trash = []
     answers = []
 
     def mine(message):
@@ -524,7 +519,7 @@ async def ask_in_channel(client, channel, user, questions):
         if not question.get("required", True):
             prompt += "\n-# type `skip` to leave this blank"
 
-        trash.append(await channel.send(embed=embeds.build(prompt)))
+        await channel.send(embed=embeds.build(prompt))
 
         while True:
             try:
@@ -532,17 +527,17 @@ async def ask_in_channel(client, channel, user, questions):
                     "message", timeout=FORM_TIMEOUT, check=mine
                 )
             except asyncio.TimeoutError:
-                await purge(trash)
                 await channel.send(
-                    embed=embeds.error("order form closed, you took too long.")
+                    embed=embeds.error(
+                        "order form closed, you took too long. press the "
+                        f"`{ORDER_FORM_LABEL}` button again to restart."
+                    )
                 )
                 return None
 
-            trash.append(reply)
             text = reply.content.strip()
 
             if text.lower() in CANCEL_WORDS:
-                await purge(trash)
                 await channel.send(embed=embeds.notice("order form cancelled."))
                 return None
 
@@ -551,18 +546,17 @@ async def ask_in_channel(client, channel, user, questions):
                 break
 
             if kind == "number" and not is_number(text):
-                trash.append(await channel.send(
+                await channel.send(
                     embed=embeds.error(
                         f"`{question['label']}` only takes numbers. send just "
                         "the amount, like `2` or `150`."
                     )
-                ))
+                )
                 continue
 
             answers.append((question["label"], text[:1000]))
             break
 
-    await purge(trash)
     return answers
 
 async def create_ticket(interaction, button_data, answers):
@@ -652,6 +646,7 @@ async def create_ticket(interaction, button_data, answers):
         "opened_at": time.time(),
         "claimed_by": None,
         "kind": button_data["label"],
+        "button_key": button_data.get("key"),
         "answers": answers,
     }
     save_tickets()
@@ -667,37 +662,18 @@ async def create_ticket(interaction, button_data, answers):
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
-    if button_data.get("confirmation_mode") and not answers:
-        intro = await channel.send(
-            content=ping,
-            embed=embeds.build(welcome),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
-        )
-        collected = await ask_in_channel(
-            interaction.client,
-            channel,
-            interaction.user,
-            button_data.get("questions") or ORDER_PRESET_QUESTIONS,
-        )
-        if collected is None:
-            answers = []
-        else:
-            answers = collected
-            await purge([intro])
-        if channel.id in tickets:
-            tickets[channel.id]["answers"] = answers
-            save_tickets()
-
     detail = "\n\n".join(
         f"**{question[:256]}**\n{(answer or '-')[:1024]}" for question, answer in answers
     ) or None
 
-    if button_data.get("confirmation_mode") and answers:
-        opening_view = TicketConfirmationView(guild, ping, answers, interaction.user.id)
-    else:
-        opening_view = TicketControlView(
-            ping, heading, welcome, detail, settings["panel"]["color"]
-        )
+    opening_view = TicketControlView(
+        ping,
+        heading,
+        welcome,
+        detail,
+        settings["panel"]["color"],
+        bool(button_data.get("confirmation_mode")),
+    )
 
     opening_message = await channel.send(
         view=opening_view,
@@ -1079,6 +1055,7 @@ class TicketOpenButton(discord.ui.Button):
             await interaction.response.send_modal(TicketQuestionModal(button_data))
             return
 
+
         await interaction.response.defer(ephemeral=True)
         await create_ticket(interaction, button_data, [])
 
@@ -1246,6 +1223,78 @@ class TicketControls(discord.ui.ActionRow):
             CloseReasonModal(data, interaction.channel)
         )
 
+class OrderFormButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label=ORDER_FORM_LABEL,
+            style=discord.ButtonStyle.secondary,
+            custom_id="ticket:orderform",
+        )
+
+    async def callback(self, interaction):
+        data = tickets.get(interaction.channel.id)
+        if data is None:
+            await interaction.response.send_message(
+                embed=embeds.error("this isn't a tracked ticket."), ephemeral=True
+            )
+            return
+
+        settings = get_config(interaction.guild.id)
+        if not settings:
+            await interaction.response.send_message(
+                embed=embeds.error("ticket system is not configured."), ephemeral=True
+            )
+            return
+
+        if interaction.user.id != data["opener_id"] and not is_staff(
+            interaction.user, settings
+        ):
+            await interaction.response.send_message(
+                embed=embeds.error("only whoever opened this ticket can fill the form."),
+                ephemeral=True,
+            )
+            return
+
+        if interaction.channel.id in open_forms:
+            await interaction.response.send_message(
+                embed=embeds.error("the form is already open, answer the question above."),
+                ephemeral=True,
+            )
+            return
+
+        button_data = find_button(settings, data.get("button_key") or "") or {}
+        questions = button_data.get("questions") or ORDER_PRESET_QUESTIONS
+
+        await interaction.response.send_message(
+            embed=embeds.notice("answer each question below. type `cancel` to stop."),
+            ephemeral=True,
+        )
+
+        open_forms.add(interaction.channel.id)
+        try:
+            answers = await ask_in_channel(
+                interaction.client, interaction.channel, interaction.user, questions
+            )
+        finally:
+            open_forms.discard(interaction.channel.id)
+
+        if answers is None:
+            return
+
+        data["answers"] = answers
+        save_tickets()
+
+        roles = staff_roles(interaction.guild, settings)
+        mentions = " ".join(r.mention for r in roles)
+        ping = f"<@{data['opener_id']}> {mentions}".strip()
+
+        await interaction.channel.send(
+            view=TicketConfirmationView(
+                interaction.guild, ping, answers, data["opener_id"]
+            ),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
+        )
+
 class TicketConfirmButton(discord.ui.Button):
     def __init__(self, settings, order, author_id, guild):
         super().__init__(style=discord.ButtonStyle.secondary)
@@ -1302,7 +1351,8 @@ class TicketConfirmationView(discord.ui.LayoutView):
         self.add_item(container)
 
 class TicketControlView(discord.ui.LayoutView):
-    def __init__(self, ping=None, heading=None, body=None, detail=None, color=None):
+    def __init__(self, ping=None, heading=None, body=None, detail=None, color=None,
+                 order_form=False):
         super().__init__(timeout=None)
         if ping:
             self.add_item(discord.ui.TextDisplay(ping))
@@ -1323,7 +1373,10 @@ class TicketControlView(discord.ui.LayoutView):
         if heading or body or detail:
             self.add_item(container)
 
-        self.add_item(TicketControls())
+        controls = TicketControls()
+        if order_form:
+            controls.add_item(OrderFormButton())
+        self.add_item(controls)
 
 class EmbedEditModal(discord.ui.Modal, title="Panel Appearance"):
     def __init__(self, settings, builder):
@@ -2079,7 +2132,7 @@ class Tickets(commands.Cog):
             return
         self._views_added = True
 
-        self.bot.add_view(TicketControlView())
+        self.bot.add_view(TicketControlView(order_form=True))
         self.bot.add_view(LogControlView())
 
         for guild_key, settings in config.items():
