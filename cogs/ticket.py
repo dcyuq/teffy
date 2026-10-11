@@ -519,7 +519,9 @@ async def ask_in_channel(client, channel, user, questions):
         if not question.get("required", True):
             prompt += "\n-# type `skip` to leave this blank"
 
-        await channel.send(embed=embeds.build(prompt))
+        await channel.send(
+            prompt, allowed_mentions=discord.AllowedMentions.none()
+        )
 
         while True:
             try:
@@ -1357,9 +1359,7 @@ class TicketControlView(discord.ui.LayoutView):
         if ping:
             self.add_item(discord.ui.TextDisplay(ping))
 
-        container = discord.ui.Container(
-            accent_colour=discord.Colour(color) if color else None
-        )
+        container = discord.ui.Container()
         if heading:
             container.add_item(discord.ui.TextDisplay(heading))
             container.add_item(discord.ui.Separator())
