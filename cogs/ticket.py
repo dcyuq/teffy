@@ -1347,9 +1347,9 @@ class TicketConfirmationView(discord.ui.LayoutView):
         )
         container.add_item(discord.ui.TextDisplay(receipt[:4000]))
         container.add_item(discord.ui.Separator())
-        controls = TicketControls()
-        controls.add_item(TicketConfirmButton(settings, order, author_id, guild))
-        container.add_item(controls)
+        row = discord.ui.ActionRow()
+        row.add_item(TicketConfirmButton(settings, order, author_id, guild))
+        container.add_item(row)
         self.add_item(container)
 
 class TicketControlView(discord.ui.LayoutView):
