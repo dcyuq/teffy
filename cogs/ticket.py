@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import unicodedata
 import re
 import time
 import uuid
@@ -122,6 +123,7 @@ DEFAULT_BUTTON = {
     "style": "primary",
     "emoji": None,
     "category_id": None,
+    "channel_name": "",
     "header": "{user} {staff}",
     "welcome": "Describe your issue and someone will be with you shortly.",
     "questions": [],
@@ -129,6 +131,106 @@ DEFAULT_BUTTON = {
 }
 
 HEADER_LIMIT = 400
+NAME_LIMIT = 90
+
+LOOKALIKE = {
+    "\u1950": "t", "\u1952": "n", "\u1953": "c", "\u1954": "s", "\u1955": "d",
+    "\u1957": "p", "\u195b": "s", "\u195d": "h", "\u1960": "l", "\u1961": "c",
+    "\u1962": "f", "\u1963": "w", "\u1968": "y", "\u1969": "u", "\u196a": "v",
+    "\u1970": "l", "\u1972": "e", "\u1973": "o", "\u1974": "c",
+    "\u1990": "n", "\u1991": "s", "\u1992": "m", "\u1993": "n", "\u1994": "d",
+    "\u1996": "a", "\u199c": "v", "\u199d": "w", "\u19ac": "y", "\u19ae": "o",
+    "\u19ee": "e", "\u183b": "f", "\u1d0f": "o", "\u0261": "g",
+    "\uaa80": "n", "\uaa8a": "u", "\uaa8e": "s", "\uaa91": "m", "\uaa96": "a",
+    "\uaa9c": "v", "\uaa9d": "w", "\uaaac": "y", "\uaaae": "o", "\uaab6": "o",
+    "\uaabb": "t", "\uaac0": "e",
+}
+
+NAME_LETTER = re.compile(r"\bLETTER ([A-Z])\b")
+
+def fold_char(ch):
+    if ch.isascii():
+        return ch
+
+    swap = LOOKALIKE.get(ch)
+    if swap:
+        return swap
+
+    plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+    if plain:
+        return plain
+
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        return ""
+
+    parts = name.split()
+    tail = parts[-1]
+    if len(tail) == 1 and tail.isalpha():
+        return tail.lower()
+
+    found = NAME_LETTER.search(name)
+    return found.group(1).lower() if found else ""
+
+def fold(text):
+    return "".join(fold_char(ch) for ch in text or "")
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", fold(text).lower()).strip("-")
+
+def channel_slug(button_data, member, number):
+    template = (button_data.get("channel_name") or "").strip()
+    if not template:
+        return f"ticket-{number:04d}"
+
+    values = {
+        "label": button_data.get("label", "ticket"),
+        "ticket": button_data.get("label", "ticket"),
+        "user": member.name,
+        "username": member.name,
+        "nickname": member.display_name,
+        "number": f"{number:04d}",
+    }
+
+    def swap(match):
+        return str(values.get(match.group(1).strip().lower(), match.group(0)))
+
+    name = slugify(re.sub(r"\{([a-zA-Z0-9_]+)\}", swap, template))
+    return name[:NAME_LIMIT] or f"ticket-{number:04d}"
+
+def ticket_context(member, guild, channel, number, answers=None, questions=None):
+    context = {
+        "user": member.mention,
+        "username": member.name,
+        "nickname": member.display_name,
+        "guild_name": guild.name,
+        "server": guild.name,
+        "channel": channel.mention if channel else "",
+        "ticket": channel.mention if channel else "",
+        "number": f"{number:04d}",
+        "ticket_number": str(number),
+    }
+    if answers:
+        context.update(confirmation.answers_to_order(questions or [], answers))
+        for label, answer in answers:
+            value = (answer or "").strip()
+            name = (label or "").strip().lower()
+            for variant in {name, name.strip("?!.:")}:
+                if variant:
+                    context.setdefault(variant, value)
+                    context.setdefault(re.sub(r"\s+", "_", variant), value)
+    return context
+
+def fill(template, context):
+    if not template:
+        return template
+
+    def swap(match):
+        key = match.group(1).strip().lower()
+        return str(context[key]) if key in context else match.group(0)
+
+    return re.sub(r"\{([^{}]+)\}", swap, template)
 
 def render_header(template, member, roles, number, channel=None):
     if template is None:
@@ -516,13 +618,16 @@ async def ask_in_channel(client, channel, user, questions):
 
     for index, question in enumerate(questions):
         kind = confirmation.question_kind(question, index)
-        notes = [f"question {index + 1} of {len(questions)}"]
+        notes = [f"{index + 1}/{len(questions)}"]
         if kind == "number":
             notes.append("numbers only")
         if not question.get("required", True):
             notes.append("type `skip` to leave this blank")
 
         label = confirmation.render(question["label"], {}, user.id, channel.guild)
+        hint = (question.get("hint") or "").strip()
+        if hint:
+            notes.insert(0, confirmation.render(hint, {}, user.id, channel.guild))
         prompt = f"{label}\n-# {' · '.join(notes)}"
 
         await channel.send(
@@ -630,7 +735,7 @@ async def create_ticket(interaction, button_data, answers):
 
     try:
         channel = await guild.create_text_channel(
-            name=f"ticket-{number:04d}",
+            name=channel_slug(button_data, interaction.user, number),
             category=category,
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user}",
@@ -659,7 +764,13 @@ async def create_ticket(interaction, button_data, answers):
     }
     save_tickets()
 
-    welcome = button_data.get("welcome") or DEFAULT_BUTTON["welcome"]
+    context = ticket_context(
+        interaction.user, guild, channel, number, answers,
+        confirmation.questions_of(confirmation.settings_for(guild.id)),
+    )
+    welcome = fill(
+        button_data.get("welcome") or DEFAULT_BUTTON["welcome"], context
+    )
     heading = f"### Ticket {number:04d} - {button_data['label']}"
     ping = render_header(
         button_data.get("header"), interaction.user, roles, number, channel
@@ -1274,6 +1385,7 @@ class OrderFormButton(discord.ui.Button):
         questions = confirmation.questions_of(
             confirmation.settings_for(interaction.guild.id)
         )
+        self.questions = questions
 
         await interaction.response.send_message(
             embed=embeds.notice("answer each question below. type `cancel` to stop."),
@@ -1307,7 +1419,11 @@ class OrderFormButton(discord.ui.Button):
 
         await interaction.channel.send(
             view=TicketConfirmationView(
-                interaction.guild, ping, answers, data["opener_id"]
+                interaction.guild,
+                ping,
+                answers,
+                data["opener_id"],
+                confirmation.answers_to_order(questions, answers),
             ),
             allowed_mentions=discord.AllowedMentions(users=True, roles=roles or False),
         )
@@ -1332,14 +1448,19 @@ class TicketConfirmButton(discord.ui.Button):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-def confirmation_order(answers):
-    return confirmation.answers_to_order(answers)
+def confirmation_order(answers, questions=None):
+    if questions is None:
+        questions = confirmation.DEFAULT_QUESTIONS
+    return confirmation.answers_to_order(questions, answers)
 
 class TicketConfirmationView(discord.ui.LayoutView):
-    def __init__(self, guild, ping, answers, author_id):
+    def __init__(self, guild, ping, answers, author_id, order=None):
         super().__init__(timeout=None)
         settings = confirmation.settings_for(guild.id)
-        order = confirmation_order(answers)
+        if order is None:
+            order = confirmation_order(
+                answers, confirmation.questions_of(settings)
+            )
         if ping:
             self.add_item(discord.ui.TextDisplay(ping[:2000]))
         container = discord.ui.Container()
@@ -1489,33 +1610,20 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             max_length=2000,
             required=False,
         )
-        self.f_category = discord.ui.TextInput(
-            label="Category ID override",
-            default=str(base.get("category_id") or ""),
-            placeholder="Blank uses the default category",
+        self.f_channel = discord.ui.TextInput(
+            label="Channel name",
+            default=base.get("channel_name", ""),
+            placeholder="{label}-{username} - blank for ticket-0001",
             required=False,
-            max_length=25,
+            max_length=NAME_LIMIT,
         )
         for item in (self.f_label, self.f_emoji, self.f_header, self.f_welcome,
-                     self.f_category):
+                     self.f_channel):
             self.add_item(item)
 
     async def on_submit(self, interaction):
-        category_id = None
-        raw = self.f_category.value.strip()
-        if raw:
-            if not raw.isdigit():
-                await interaction.response.send_message(
-                    embed=embeds.error("category ID must be numbers only."), ephemeral=True
-                )
-                return
-            candidate = interaction.guild.get_channel(int(raw))
-            if not isinstance(candidate, discord.CategoryChannel):
-                await interaction.response.send_message(
-                    embed=embeds.error("that ID isn't a category in this server."), ephemeral=True
-                )
-                return
-            category_id = candidate.id
+        category_id = (self.existing or {}).get("category_id")
+        channel_name = self.f_channel.value.strip()
 
         emoji_value, emoji_problem = resolve_icon(
             self.f_emoji.value, interaction.guild, interaction.client
@@ -1544,6 +1652,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
                     "style": "primary",
                     "emoji": emoji_value,
                     "category_id": category_id,
+                    "channel_name": channel_name,
                     "header": header,
                     "welcome": welcome,
                     "questions": [],
@@ -1553,7 +1662,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
         else:
             self.existing["label"] = self.f_label.value
             self.existing["emoji"] = emoji_value
-            self.existing["category_id"] = category_id
+            self.existing["channel_name"] = channel_name
             self.existing["header"] = header
             self.existing["welcome"] = welcome
 
@@ -1814,7 +1923,8 @@ class ButtonManageView(discord.ui.View):
                 confirmation.settings_for(self.builder.ctx.guild.id)
             )
             listed = "\n".join(
-                f"{i + 1}. {q['label'].splitlines()[0][:80]}"
+                f"{i + 1}. {q['label'][:60]} → "
+                f"`{{{confirmation.question_key(q, i)}}}`"
                 for i, q in enumerate(questions)
             )
             listed += "\n\nedit these in `confirmation setup` → order form."
@@ -1840,6 +1950,8 @@ class ButtonManageView(discord.ui.View):
                 f"**Icon** - {icon_text(self.button_data)}\n"
                 f"**Colour** - {style_label(self.button_data.get('style'))}\n"
                 f"**Category** - {category_text}\n"
+                f"**Channel name** - "
+                f"{self.button_data.get('channel_name') or 'ticket-0001'}\n"
                 f"**Header** - {header or 'none'}\n"
                 f"**Behaviour** - {mode}\n\n"
                 f"{listed}"
