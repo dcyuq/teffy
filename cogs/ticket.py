@@ -122,10 +122,34 @@ DEFAULT_BUTTON = {
     "style": "primary",
     "emoji": None,
     "category_id": None,
+    "header": "{user} {staff}",
     "welcome": "Describe your issue and someone will be with you shortly.",
     "questions": [],
     "confirmation_mode": False,
 }
+
+HEADER_LIMIT = 400
+
+def render_header(template, member, roles, number, channel=None):
+    if template is None:
+        template = DEFAULT_BUTTON["header"]
+
+    mentions = " ".join(r.mention for r in roles)
+    values = {
+        "user": member.mention,
+        "opener": member.mention,
+        "staff": mentions,
+        "staffs": mentions,
+        "roles": mentions,
+        "number": f"{number:04d}",
+        "ticket": channel.mention if channel else "",
+        "channel": channel.mention if channel else "",
+    }
+
+    def swap(match):
+        return values.get(match.group(1).strip().lower(), match.group(0))
+
+    return re.sub(r"\{([a-zA-Z0-9_]+)\}", swap, template).strip()
 
 def apply_order_preset(button_data):
     button_data["confirmation_mode"] = True
@@ -637,8 +661,9 @@ async def create_ticket(interaction, button_data, answers):
 
     welcome = button_data.get("welcome") or DEFAULT_BUTTON["welcome"]
     heading = f"### Ticket {number:04d} - {button_data['label']}"
-    mentions = " ".join(r.mention for r in roles)
-    ping = f"{interaction.user.mention} {mentions}".strip()
+    ping = render_header(
+        button_data.get("header"), interaction.user, roles, number, channel
+    )
 
     await interaction.followup.send(
         embed=embeds.notice(f"ticket created: {channel.mention}"),
@@ -1270,8 +1295,15 @@ class OrderFormButton(discord.ui.Button):
         save_tickets()
 
         roles = staff_roles(interaction.guild, settings)
-        mentions = " ".join(r.mention for r in roles)
-        ping = f"<@{data['opener_id']}> {mentions}".strip()
+        button_data = find_button(settings, data.get("button_key") or "") or {}
+        opener = interaction.guild.get_member(data["opener_id"]) or interaction.user
+        ping = render_header(
+            button_data.get("header"),
+            opener,
+            roles,
+            data["number"],
+            interaction.channel,
+        )
 
         await interaction.channel.send(
             view=TicketConfirmationView(
@@ -1442,6 +1474,14 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             required=False,
             max_length=100,
         )
+        self.f_header = discord.ui.TextInput(
+            label="Header above the box",
+            default=base.get("header", DEFAULT_BUTTON["header"]),
+            placeholder="{user} {staffs} {ticket} {number} - blank for none",
+            style=discord.TextStyle.paragraph,
+            max_length=HEADER_LIMIT,
+            required=False,
+        )
         self.f_welcome = discord.ui.TextInput(
             label="Opening message",
             default=base.get("welcome", ""),
@@ -1456,7 +1496,8 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             required=False,
             max_length=25,
         )
-        for item in (self.f_label, self.f_emoji, self.f_welcome, self.f_category):
+        for item in (self.f_label, self.f_emoji, self.f_header, self.f_welcome,
+                     self.f_category):
             self.add_item(item)
 
     async def on_submit(self, interaction):
@@ -1491,6 +1532,10 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             self.f_welcome.value, interaction.guild, interaction.client
         ) or DEFAULT_BUTTON["welcome"]
 
+        header = resolve_text(
+            self.f_header.value.strip(), interaction.guild, interaction.client
+        )
+
         if self.existing is None:
             self.settings["buttons"].append(
                 {
@@ -1499,6 +1544,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
                     "style": "primary",
                     "emoji": emoji_value,
                     "category_id": category_id,
+                    "header": header,
                     "welcome": welcome,
                     "questions": [],
                     "confirmation_mode": False,
@@ -1508,6 +1554,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             self.existing["label"] = self.f_label.value
             self.existing["emoji"] = emoji_value
             self.existing["category_id"] = category_id
+            self.existing["header"] = header
             self.existing["welcome"] = welcome
 
         save_config()
@@ -1785,12 +1832,15 @@ class ButtonManageView(discord.ui.View):
         category = self.builder.ctx.guild.get_channel(override) if override else None
         category_text = category.name if category else "default category"
 
+        header = self.button_data.get("header", DEFAULT_BUTTON["header"])
+
         return discord.Embed(
             title=f"Button: {self.button_data['label']}",
             description=(
                 f"**Icon** - {icon_text(self.button_data)}\n"
                 f"**Colour** - {style_label(self.button_data.get('style'))}\n"
                 f"**Category** - {category_text}\n"
+                f"**Header** - {header or 'none'}\n"
                 f"**Behaviour** - {mode}\n\n"
                 f"{listed}"
             ),
