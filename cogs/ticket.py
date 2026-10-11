@@ -127,30 +127,9 @@ DEFAULT_BUTTON = {
     "confirmation_mode": False,
 }
 
-ORDER_PRESET_QUESTIONS = [
-    {"label": "Item", "required": True, "kind": "text"},
-    {"label": "Price", "required": True, "kind": "number"},
-    {"label": "Quantity", "required": True, "kind": "number"},
-    {"label": "Notes", "required": False, "kind": "text"},
-]
-
-NUMBER_LABELS = {"price", "amount", "cost", "total", "quantity", "qty"}
-
-NUMBERISH = re.compile(r"^[^\d\-]{0,3}\s*-?\d+(?:[.,]\d+)?\s*$")
-
-def question_kind(question):
-    kind = (question.get("kind") or "").lower()
-    if kind in ("text", "number"):
-        return kind
-    label = re.sub(r"\s+", " ", (question.get("label") or "").strip().lower())
-    return "number" if label in NUMBER_LABELS else "text"
-
-def is_number(text):
-    return bool(NUMBERISH.match((text or "").replace(",", "")))
-
 def apply_order_preset(button_data):
     button_data["confirmation_mode"] = True
-    button_data["questions"] = [dict(q) for q in ORDER_PRESET_QUESTIONS]
+    button_data["questions"] = []
     return button_data
 
 CUSTOM_TOKEN = re.compile(r"<(a?):([A-Za-z0-9_~]{2,32}):(\d{15,25})>")
@@ -511,16 +490,19 @@ async def ask_in_channel(client, channel, user, questions):
     def mine(message):
         return message.author.id == user.id and message.channel.id == channel.id
 
-    for index, question in enumerate(questions, start=1):
-        kind = question_kind(question)
-        prompt = f"**question {index} of {len(questions)}**\n{question['label']}"
+    for index, question in enumerate(questions):
+        kind = confirmation.question_kind(question, index)
+        notes = [f"question {index + 1} of {len(questions)}"]
         if kind == "number":
-            prompt += "\n-# numbers only"
+            notes.append("numbers only")
         if not question.get("required", True):
-            prompt += "\n-# type `skip` to leave this blank"
+            notes.append("type `skip` to leave this blank")
+
+        label = confirmation.render(question["label"], {}, user.id, channel.guild)
+        prompt = f"{label}\n-# {' · '.join(notes)}"
 
         await channel.send(
-            prompt, allowed_mentions=discord.AllowedMentions.none()
+            prompt[:2000], allowed_mentions=discord.AllowedMentions.none()
         )
 
         while True:
@@ -547,7 +529,7 @@ async def ask_in_channel(client, channel, user, questions):
                 answers.append((question["label"], ""))
                 break
 
-            if kind == "number" and not is_number(text):
+            if kind == "number" and not confirmation.is_number(text):
                 await channel.send(
                     embed=embeds.error(
                         f"`{question['label']}` only takes numbers. send just "
@@ -1264,8 +1246,9 @@ class OrderFormButton(discord.ui.Button):
             )
             return
 
-        button_data = find_button(settings, data.get("button_key") or "") or {}
-        questions = button_data.get("questions") or ORDER_PRESET_QUESTIONS
+        questions = confirmation.questions_of(
+            confirmation.settings_for(interaction.guild.id)
+        )
 
         await interaction.response.send_message(
             embed=embeds.notice("answer each question below. type `cancel` to stop."),
@@ -1318,20 +1301,7 @@ class TicketConfirmButton(discord.ui.Button):
         )
 
 def confirmation_order(answers):
-    order = {"item": "", "price": "", "quantity": "", "notes": ""}
-    aliases = {
-        "item": {"item", "order", "product", "name"},
-        "price": {"price", "amount", "cost", "total"},
-        "quantity": {"quantity", "qty", "how many"},
-        "notes": {"notes", "note", "details", "description", "extra", "details/notes"},
-    }
-    for label, answer in answers:
-        normalized = re.sub(r"\s+", " ", (label or "").strip().lower())
-        for field, names in aliases.items():
-            if normalized in names:
-                order[field] = (answer or "").strip()
-                break
-    return order
+    return confirmation.answers_to_order(answers)
 
 class TicketConfirmationView(discord.ui.LayoutView):
     def __init__(self, guild, ping, answers, author_id):
@@ -1566,16 +1536,14 @@ class QuestionsModal(discord.ui.Modal, title="Ticket Questions"):
     async def on_submit(self, interaction):
         await interaction.response.defer()
 
-        previous = {q["label"]: q for q in self.button_data.get("questions", [])}
+        previous = self.button_data.get("questions", [])
         questions = []
-        for field in self.fields:
+        for index, field in enumerate(self.fields):
             text = field.value.strip()
             if not text:
                 continue
-            old = previous.get(text, {})
+            old = previous[index] if index < len(previous) else {}
             entry = {"label": text}
-            if old.get("kind"):
-                entry["kind"] = old["kind"]
             if "required" in old:
                 entry["required"] = old["required"]
             questions.append(entry)
@@ -1795,10 +1763,14 @@ class ButtonManageView(discord.ui.View):
         count = len(self.button_data.get("questions", []))
         if self.button_data.get("confirmation_mode"):
             mode = "Order form, asked one question at a time in the ticket"
+            questions = confirmation.questions_of(
+                confirmation.settings_for(self.builder.ctx.guild.id)
+            )
             listed = "\n".join(
-                f"{i + 1}. {q['label']} ({question_kind(q)})"
-                for i, q in enumerate(self.button_data.get("questions", []))
-            ) or "No questions set."
+                f"{i + 1}. {q['label'].splitlines()[0][:80]}"
+                for i, q in enumerate(questions)
+            )
+            listed += "\n\nedit these in `confirmation setup` → order form."
         elif count:
             mode = f"Asks {count} question(s) in a modal before opening"
             listed = "\n".join(
@@ -1847,6 +1819,14 @@ class ButtonManageView(discord.ui.View):
 
     @discord.ui.button(label="Set Questions", style=discord.ButtonStyle.secondary, row=2)
     async def set_questions(self, interaction, button):
+        if self.button_data.get("confirmation_mode"):
+            await interaction.response.send_message(
+                embed=embeds.notice(
+                    "order form questions live in `confirmation setup` → order form."
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(
             QuestionsModal(self.builder, self.button_data)
         )

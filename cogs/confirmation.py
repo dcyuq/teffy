@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import re
 
@@ -9,7 +8,6 @@ from discord.ext import commands
 import embeds
 import emojiutils
 import templating
-from prefixes import display_prefix
 from storage import Store
 
 log = logging.getLogger(__name__)
@@ -18,10 +16,8 @@ FIELD_LIMIT = 200
 NOTES_LIMIT = 500
 FORMAT_LIMIT = 2000
 LABEL_LIMIT = 80
-MAX_QUESTIONS = 10
-MODAL_LIMIT = 5
-FORM_TIMEOUT = 300
-CANCEL_WORDS = {"cancel", "stop", "nvm"}
+QUESTION_LIMIT = 500
+MAX_QUESTIONS = 5
 
 DEFAULT_CONFIRM_FORMAT = (
     "**order confirmation**\n"
@@ -79,18 +75,19 @@ DEFAULT_GCASH_TEXT = (
 DEFAULT_PING = "one last check, :c_heart: {user}"
 
 DEFAULT_QUESTIONS = [
-    {"field": "item", "label": "name of the order", "kind": "text",
-     "hint": "what are you ordering?"},
-    {"field": "quantity", "label": "quantity of the order", "kind": "number",
-     "hint": "numbers only"},
-    {"field": "price", "label": "total price", "kind": "number",
-     "hint": "numbers only"},
-    {"field": "notes", "label": "gamepass link", "kind": "text",
-     "hint": "type no gp if you don't have one"},
+    {"label": "name of your order?\nonly the name, don't put the quantity here",
+     "kind": "text", "required": True},
+    {"label": "total price?", "kind": "number", "required": True},
+    {"label": "how many?", "kind": "number", "required": True},
+    {"label": "gamepass link?\nput no gp if you don't have one", "kind": "text",
+     "required": False},
 ]
 
-DEFAULT_FORM_BUTTON = "order form"
-DEFAULT_FORM_TEXT = "click below to fill in your order."
+ORDER_FIELDS = ("item", "price", "quantity", "notes")
+
+NUMBER_LABELS = {"price", "amount", "cost", "total", "quantity", "qty"}
+
+NUMBERISH = re.compile(r"^[^\d\-]{0,3}\s*-?\d+(?:[.,]\d+)?\s*$")
 
 SAMPLE_ORDER = {
     "item": "pinned post",
@@ -119,8 +116,6 @@ IMAGE_URL = re.compile(
 
 CUSTOM_EMOJI = re.compile(r"^(<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>)\s*(.*)$", re.DOTALL)
 SHORTCODE = re.compile(r"^:([A-Za-z0-9_~]{2,32}):\s*(.*)$", re.DOTALL)
-NUMBERISH = re.compile(r"^[^\d\-]{0,3}\s*-?\d+(?:[.,]\d+)?\s*$")
-FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]{0,19}$")
 
 _store = Store("confirmation_config.json")
 config = _store.load()
@@ -143,9 +138,6 @@ def defaults():
         "gcash_button": DEFAULT_GCASH_BUTTON,
         "gcash_text": DEFAULT_GCASH_TEXT,
         "questions": [dict(question) for question in DEFAULT_QUESTIONS],
-        "form_mode": "chat",
-        "form_button": DEFAULT_FORM_BUTTON,
-        "form_text": DEFAULT_FORM_TEXT,
     }
 
 
@@ -165,7 +157,7 @@ def ensure_config(guild_id):
         }]
 
     if not settings.get("questions"):
-        settings["questions"] = [dict(question) for question in DEFAULT_QUESTIONS]
+        settings["questions"] = [dict(q) for q in DEFAULT_QUESTIONS]
 
     return settings
 
@@ -186,7 +178,7 @@ def settings_for(guild_id):
         }]
 
     if not settings.get("questions"):
-        settings["questions"] = [dict(question) for question in DEFAULT_QUESTIONS]
+        settings["questions"] = [dict(q) for q in DEFAULT_QUESTIONS]
 
     return settings
 
@@ -195,46 +187,45 @@ def questions_of(settings):
     return settings.get("questions") or DEFAULT_QUESTIONS
 
 
-def find_question(settings, field):
-    for entry in questions_of(settings):
-        if entry["field"] == field:
-            return entry
-    return None
+def order_field(index):
+    return ORDER_FIELDS[index] if index < len(ORDER_FIELDS) else None
+
+
+def question_kind(question, index=None):
+    kind = (question.get("kind") or "").lower()
+    if kind in ("text", "number"):
+        return kind
+    if index is not None and order_field(index) in ("price", "quantity"):
+        return "number"
+    label = re.sub(r"\s+", " ", (question.get("label") or "").strip().lower())
+    return "number" if label in NUMBER_LABELS else "text"
 
 
 def is_number(text):
     return bool(NUMBERISH.match((text or "").replace(",", "")))
 
 
+def answers_to_order(answers):
+    order = {"item": "", "price": "", "quantity": "", "notes": ""}
+    for index, (_, answer) in enumerate(answers):
+        field = order_field(index)
+        if field:
+            order[field] = (answer or "").strip()
+    return order
+
+
 def order_values(order, author_id):
-    values = {key: value for key, value in order.items() if key != "user"}
-    values.setdefault("item", "")
-    values.setdefault("price", "")
-    values.setdefault("quantity", "")
-    values["notes"] = order.get("notes") or "none"
-    values["user"] = f"<@{author_id}>" if author_id else ""
-    return values
-
-
-def aliases_for(order):
-    aliases = dict(ALIASES)
-    for key in order:
-        aliases.setdefault(key, key)
-    return aliases
+    return {
+        "item": order.get("item", ""),
+        "price": order.get("price", ""),
+        "quantity": order.get("quantity", ""),
+        "notes": order.get("notes") or "none",
+        "user": f"<@{author_id}>" if author_id else "",
+    }
 
 
 def render(template, order, author_id, guild):
-    return templating.render(
-        template, order_values(order, author_id), aliases_for(order), guild
-    )
-
-
-def placeholder_list(settings):
-    lines = [
-        f"`{{{q['field']}}}` - {q['label']}" for q in questions_of(settings)
-    ]
-    lines.append("`{user}` - pings whoever filled the form")
-    return "\n".join(lines)
+    return templating.render(template, order_values(order, author_id), ALIASES, guild)
 
 
 def split_image(body):
@@ -473,420 +464,6 @@ class PaymentMethodView(discord.ui.LayoutView):
         self.add_item(box)
 
 
-active = set()
-
-
-async def purge(messages):
-    for message in messages:
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-            pass
-
-
-async def ask_questions(client, channel, user, settings):
-    trash = []
-    order = {}
-    entries = questions_of(settings)
-
-    def mine(message):
-        return message.author.id == user.id and message.channel.id == channel.id
-
-    for index, entry in enumerate(entries, start=1):
-        prompt = f"**question {index} of {len(entries)}**\n{entry['label']}"
-        hint = (entry.get("hint") or "").strip()
-        if hint:
-            prompt += f"\n-# {hint}"
-
-        trash.append(await channel.send(embed=embeds.build(prompt)))
-
-        while True:
-            try:
-                reply = await client.wait_for("message", timeout=FORM_TIMEOUT, check=mine)
-            except asyncio.TimeoutError:
-                await purge(trash)
-                await channel.send(
-                    embed=embeds.error("order form closed, you took too long."),
-                    delete_after=20,
-                )
-                return None
-
-            trash.append(reply)
-            text = reply.content.strip()
-
-            if text.lower() in CANCEL_WORDS:
-                await purge(trash)
-                await channel.send(
-                    embed=embeds.notice("order form cancelled."), delete_after=20
-                )
-                return None
-
-            if entry.get("kind") == "number" and not is_number(text):
-                trash.append(await channel.send(
-                    embed=embeds.error(
-                        f"`{entry['label']}` only takes numbers. send just the "
-                        "amount, like `2` or `150`."
-                    )
-                ))
-                continue
-
-            order[entry["field"]] = text[:FIELD_LIMIT]
-            break
-
-    await purge(trash)
-    return order
-
-
-async def post_confirmation(channel, user, settings, order, guild):
-    await channel.send(
-        view=ConfirmView(settings, order, user.id, guild),
-        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
-    )
-
-
-def modal_ready(settings):
-    return (
-        settings.get("form_mode") == "modal"
-        and 0 < len(questions_of(settings)) <= MODAL_LIMIT
-    )
-
-
-class OrderModal(discord.ui.Modal, title="Order Form"):
-    def __init__(self, settings):
-        super().__init__()
-        self.settings = settings
-        self.fields = []
-
-        for entry in questions_of(settings)[:MODAL_LIMIT]:
-            field = discord.ui.TextInput(
-                label=entry["label"][:45],
-                placeholder=(entry.get("hint") or "")[:100] or None,
-                style=discord.TextStyle.short
-                if entry.get("kind") == "number"
-                else discord.TextStyle.paragraph,
-                max_length=FIELD_LIMIT,
-                required=True,
-            )
-            self.fields.append((entry, field))
-            self.add_item(field)
-
-    async def on_submit(self, interaction):
-        bad = [
-            entry["label"]
-            for entry, field in self.fields
-            if entry.get("kind") == "number" and not is_number(field.value)
-        ]
-        if bad:
-            listed = ", ".join(f"`{item}`" for item in bad)
-            await interaction.response.send_message(
-                embed=embeds.error(
-                    f"{listed} only takes numbers. open the form again and "
-                    "send just the amount, like `2` or `150`."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        order = {
-            entry["field"]: field.value.strip()[:FIELD_LIMIT]
-            for entry, field in self.fields
-        }
-        await interaction.response.defer()
-        await post_confirmation(
-            interaction.channel, interaction.user, self.settings, order, interaction.guild
-        )
-
-
-class FormRow(discord.ui.ActionRow):
-    def __init__(self, raw, guild):
-        super().__init__()
-        apply_label(self.open_form, raw, guild, DEFAULT_FORM_BUTTON)
-
-    @discord.ui.button(
-        style=discord.ButtonStyle.secondary, custom_id="confirmation:form"
-    )
-    async def open_form(self, interaction, button):
-        settings = settings_for(interaction.guild.id)
-        channel = interaction.channel
-        user = interaction.user
-        ticket = (channel.id, user.id)
-
-        if not questions_of(settings):
-            await interaction.response.send_message(
-                embed=embeds.error("no questions are set up yet."), ephemeral=True
-            )
-            return
-
-        if ticket in active:
-            await interaction.response.send_message(
-                embed=embeds.error("you already have a form open here."), ephemeral=True
-            )
-            return
-
-        if modal_ready(settings):
-            await interaction.response.send_modal(OrderModal(settings))
-            return
-
-        await interaction.response.send_message(
-            embed=embeds.notice(
-                "answer each question below. type `cancel` to stop."
-            ),
-            ephemeral=True,
-        )
-
-        active.add(ticket)
-        try:
-            order = await ask_questions(interaction.client, channel, user, settings)
-        finally:
-            active.discard(ticket)
-
-        if order is None:
-            return
-
-        await post_confirmation(channel, user, settings, order, interaction.guild)
-
-
-class FormPanel(discord.ui.LayoutView):
-    def __init__(self, settings, guild=None, body=None):
-        super().__init__(timeout=None)
-        text = body if body is not None else (settings.get("form_text") or "")
-        if text.strip():
-            box = discord.ui.Container()
-            box.add_item(discord.ui.TextDisplay(text[:4000]))
-            box.add_item(discord.ui.Separator())
-            box.add_item(FormRow(settings.get("form_button"), guild))
-            self.add_item(box)
-        else:
-            self.add_item(FormRow(settings.get("form_button"), guild))
-
-
-class QuestionModal(discord.ui.Modal):
-    def __init__(self, panel, existing=None):
-        super().__init__(title="edit question" if existing else "add question")
-        self.panel = panel
-        self.existing = existing
-        base = existing or {}
-
-        self.f_label = discord.ui.TextInput(
-            label="question",
-            default=base.get("label", ""),
-            placeholder="name of the order",
-            max_length=200,
-            required=True,
-        )
-        self.f_kind = discord.ui.TextInput(
-            label="answer type",
-            default=base.get("kind", "text"),
-            placeholder="text or number",
-            max_length=10,
-            required=True,
-        )
-        self.f_hint = discord.ui.TextInput(
-            label="small note under the question",
-            default=base.get("hint") or "",
-            placeholder="optional",
-            max_length=150,
-            required=False,
-        )
-        self.add_item(self.f_label)
-        self.add_item(self.f_kind)
-        self.add_item(self.f_hint)
-
-        if existing is None:
-            self.f_field = discord.ui.TextInput(
-                label="placeholder name",
-                placeholder="gamepass, becomes {gamepass}",
-                max_length=20,
-                required=True,
-            )
-            self.add_item(self.f_field)
-        else:
-            self.f_field = None
-
-    async def on_submit(self, interaction):
-        kind = self.f_kind.value.strip().lower()
-        if kind not in ("text", "number"):
-            await interaction.response.send_message(
-                embed=embeds.error("answer type has to be `text` or `number`."),
-                ephemeral=True,
-            )
-            return
-
-        settings = self.panel.settings
-
-        if self.existing is None:
-            field = self.f_field.value.strip().lower().replace(" ", "_")
-            if not FIELD_NAME.match(field):
-                await interaction.response.send_message(
-                    embed=embeds.error(
-                        "placeholder name has to be lowercase letters, "
-                        "numbers or underscores, starting with a letter."
-                    ),
-                    ephemeral=True,
-                )
-                return
-            if find_question(settings, field) is not None:
-                await interaction.response.send_message(
-                    embed=embeds.error(f"`{{{field}}}` is already taken."),
-                    ephemeral=True,
-                )
-                return
-
-            settings["questions"].append({
-                "field": field,
-                "label": self.f_label.value.strip(),
-                "kind": kind,
-                "hint": self.f_hint.value.strip(),
-            })
-        else:
-            self.existing["label"] = self.f_label.value.strip()
-            self.existing["kind"] = kind
-            self.existing["hint"] = self.f_hint.value.strip()
-
-        save_config()
-        await interaction.response.defer()
-        await self.panel.refresh()
-
-
-class QuestionSelect(discord.ui.Select):
-    def __init__(self, panel):
-        self.panel = panel
-        entries = questions_of(panel.settings)
-        options = [
-            discord.SelectOption(
-                label=entry["label"][:100],
-                value=entry["field"],
-                description=f"{{{entry['field']}}} · {entry.get('kind', 'text')}"[:100],
-            )
-            for entry in entries
-        ]
-        super().__init__(
-            placeholder="choose a question to customize",
-            options=options or [discord.SelectOption(label="no questions yet", value="none")],
-            disabled=not entries,
-        )
-
-    async def callback(self, interaction):
-        entry = find_question(self.panel.settings, self.values[0])
-        if entry is None:
-            await interaction.response.send_message(
-                embed=embeds.error("that question no longer exists."), ephemeral=True
-            )
-            return
-
-        view = QuestionManageView(self.panel, entry)
-        await interaction.response.edit_message(embed=view.status_embed(), view=view)
-
-
-class QuestionManageView(discord.ui.View):
-    def __init__(self, panel, entry):
-        super().__init__(timeout=300)
-        self.panel = panel
-        self.entry = entry
-
-    async def interaction_check(self, interaction):
-        return interaction.user.id == self.panel.ctx.author.id
-
-    def status_embed(self):
-        return embeds.build(
-            f"**{self.entry['label']}**\n\n"
-            f"placeholder : `{{{self.entry['field']}}}`\n"
-            f"answer type : {self.entry.get('kind', 'text')}\n"
-            f"note : {self.entry.get('hint') or 'none'}"
-        )
-
-    @discord.ui.button(label="edit", style=discord.ButtonStyle.secondary, row=0)
-    async def edit(self, interaction, button):
-        await interaction.response.send_modal(QuestionModal(self.panel, self.entry))
-
-    @discord.ui.button(label="move up", style=discord.ButtonStyle.secondary, row=0)
-    async def move_up(self, interaction, button):
-        entries = self.panel.settings["questions"]
-        index = entries.index(self.entry)
-        if index > 0:
-            entries[index - 1], entries[index] = entries[index], entries[index - 1]
-            save_config()
-        await interaction.response.edit_message(embed=self.status_embed(), view=self)
-        await self.panel.refresh()
-
-    @discord.ui.button(label="remove", style=discord.ButtonStyle.danger, row=1)
-    async def remove(self, interaction, button):
-        entries = self.panel.settings["questions"]
-        if len(entries) <= 1:
-            await interaction.response.send_message(
-                embed=embeds.error("you need at least one question."), ephemeral=True
-            )
-            return
-
-        entries.remove(self.entry)
-        save_config()
-        await interaction.response.edit_message(
-            embed=embeds.notice(f"removed **{self.entry['label']}**."), view=None
-        )
-        await self.panel.refresh()
-        self.stop()
-
-
-class QuestionsView(discord.ui.View):
-    def __init__(self, panel):
-        super().__init__(timeout=300)
-        self.panel = panel
-        self.add_item(QuestionSelect(panel))
-
-    async def interaction_check(self, interaction):
-        return interaction.user.id == self.panel.ctx.author.id
-
-    def status_embed(self):
-        settings = self.panel.settings
-        lines = [
-            f"{index}. **{entry['label']}** · `{{{entry['field']}}}` · "
-            f"{entry.get('kind', 'text')}"
-            for index, entry in enumerate(questions_of(settings), start=1)
-        ]
-        asked = "a modal" if modal_ready(settings) else "one question at a time"
-        return embeds.build(
-            "**order form questions**\n\n"
-            f"asked in {asked}.\n\n" + "\n".join(lines)
-        )
-
-    @discord.ui.button(label="add question", style=discord.ButtonStyle.secondary, row=1)
-    async def add(self, interaction, button):
-        if len(questions_of(self.panel.settings)) >= MAX_QUESTIONS:
-            await interaction.response.send_message(
-                embed=embeds.error(f"you already have {MAX_QUESTIONS} questions."),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_modal(QuestionModal(self.panel))
-
-    @discord.ui.button(label="modal / one by one", style=discord.ButtonStyle.secondary, row=1)
-    async def toggle_mode(self, interaction, button):
-        settings = self.panel.settings
-        settings["form_mode"] = (
-            "chat" if settings.get("form_mode") == "modal" else "modal"
-        )
-        save_config()
-
-        if settings["form_mode"] == "modal" and len(questions_of(settings)) > MODAL_LIMIT:
-            await interaction.response.send_message(
-                embed=embeds.error(
-                    f"a modal only fits {MODAL_LIMIT} questions, so the form "
-                    "keeps asking one by one until you remove some."
-                ),
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.edit_message(embed=self.status_embed(), view=self)
-        await self.panel.refresh()
-
-    @discord.ui.button(label="reset to defaults", style=discord.ButtonStyle.secondary, row=1)
-    async def reset(self, interaction, button):
-        self.panel.settings["questions"] = [dict(q) for q in DEFAULT_QUESTIONS]
-        save_config()
-        await interaction.response.edit_message(embed=self.status_embed(), view=self)
-        await self.panel.refresh()
-
-
 class FieldModal(discord.ui.Modal):
     def __init__(self, panel, field, label, multiline=False, required=True, limit=FORMAT_LIMIT):
         super().__init__(title=label[:45])
@@ -912,6 +489,157 @@ class FieldModal(discord.ui.Modal):
         self.panel.settings[self.field] = value
         save_config()
         await interaction.response.defer()
+        await self.panel.refresh()
+
+
+class QuestionsModal(discord.ui.Modal, title="order form questions"):
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+
+        existing = questions_of(panel.settings)
+        self.fields = []
+        for index in range(MAX_QUESTIONS):
+            current = existing[index]["label"] if index < len(existing) else ""
+            field = discord.ui.TextInput(
+                label=f"question {index + 1}",
+                default=current[:QUESTION_LIMIT],
+                placeholder="blank to skip. new lines and :emoji: work",
+                style=discord.TextStyle.paragraph,
+                required=False,
+                max_length=QUESTION_LIMIT,
+            )
+            self.fields.append(field)
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        previous = questions_of(self.panel.settings)
+        questions = []
+        for index, field in enumerate(self.fields):
+            text = field.value.strip()
+            if not text:
+                continue
+            old = previous[index] if index < len(previous) else {}
+            entry = {"label": text}
+            if old.get("kind"):
+                entry["kind"] = old["kind"]
+            if "required" in old:
+                entry["required"] = old["required"]
+            questions.append(entry)
+
+        if not questions:
+            await interaction.response.send_message(
+                embed=embeds.error("you need at least one question."), ephemeral=True
+            )
+            return
+
+        self.panel.settings["questions"] = questions
+        save_config()
+        await interaction.response.defer()
+        await self.panel.refresh()
+
+
+class QuestionTypeSelect(discord.ui.Select):
+    def __init__(self, panel):
+        self.panel = panel
+        entries = questions_of(panel.settings)
+        current = [
+            e["label"] for i, e in enumerate(entries)
+            if question_kind(e, i) == "number"
+        ]
+        super().__init__(
+            placeholder="which questions only take numbers",
+            min_values=0,
+            max_values=max(len(entries), 1),
+            options=[
+                discord.SelectOption(
+                    label=e["label"].splitlines()[0][:100],
+                    value=str(i),
+                    description=f"answer lands in {{{order_field(i) or 'unused'}}}"[:100],
+                    default=e["label"] in current,
+                )
+                for i, e in enumerate(entries)
+            ] or [discord.SelectOption(label="none", value="none")],
+            disabled=not entries,
+        )
+
+    async def callback(self, interaction):
+        picked = {int(v) for v in self.values if v.isdigit()}
+        for index, entry in enumerate(questions_of(self.panel.settings)):
+            entry["kind"] = "number" if index in picked else "text"
+        save_config()
+        view = QuestionsView(self.panel)
+        await interaction.response.edit_message(embed=view.status_embed(), view=view)
+        await self.panel.refresh()
+
+
+class QuestionSkipSelect(discord.ui.Select):
+    def __init__(self, panel):
+        self.panel = panel
+        entries = questions_of(panel.settings)
+        super().__init__(
+            placeholder="which questions can be skipped",
+            min_values=0,
+            max_values=max(len(entries), 1),
+            options=[
+                discord.SelectOption(
+                    label=e["label"].splitlines()[0][:100],
+                    value=str(i),
+                    default=not e.get("required", True),
+                )
+                for i, e in enumerate(entries)
+            ] or [discord.SelectOption(label="none", value="none")],
+            disabled=not entries,
+        )
+
+    async def callback(self, interaction):
+        picked = {int(v) for v in self.values if v.isdigit()}
+        for index, entry in enumerate(questions_of(self.panel.settings)):
+            entry["required"] = index not in picked
+        save_config()
+        view = QuestionsView(self.panel)
+        await interaction.response.edit_message(embed=view.status_embed(), view=view)
+        await self.panel.refresh()
+
+
+class QuestionsView(discord.ui.View):
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.add_item(QuestionTypeSelect(panel))
+        self.add_item(QuestionSkipSelect(panel))
+
+    async def interaction_check(self, interaction):
+        return interaction.user.id == self.panel.ctx.author.id
+
+    def status_embed(self):
+        lines = []
+        for index, entry in enumerate(questions_of(self.panel.settings)):
+            kind = question_kind(entry, index)
+            flags = [kind]
+            if not entry.get("required", True):
+                flags.append("skippable")
+            lines.append(
+                f"**{index + 1}.** {entry['label'][:200]}\n"
+                f"-# {' · '.join(flags)} → `{{{order_field(index) or 'unused'}}}`"
+            )
+
+        return embeds.build(
+            "**order form questions**\n\n"
+            "asked one at a time in the ticket, in this order.\n\n"
+            + "\n\n".join(lines)
+        )
+
+    @discord.ui.button(label="edit questions", style=discord.ButtonStyle.secondary, row=2)
+    async def edit(self, interaction, button):
+        await interaction.response.send_modal(QuestionsModal(self.panel))
+
+    @discord.ui.button(label="reset to defaults", style=discord.ButtonStyle.secondary, row=2)
+    async def reset(self, interaction, button):
+        self.panel.settings["questions"] = [dict(q) for q in DEFAULT_QUESTIONS]
+        save_config()
+        view = QuestionsView(self.panel)
+        await interaction.response.edit_message(embed=view.status_embed(), view=view)
         await self.panel.refresh()
 
 
@@ -1153,6 +881,12 @@ class RemovePaymentMethodModal(discord.ui.Modal):
         )
 
 
+class PaymentMethodsModal:
+
+    def __init__(self, panel):
+        self.panel = panel
+
+
 class SetupView(discord.ui.View):
     def __init__(self, ctx, settings):
         super().__init__(timeout=300)
@@ -1179,22 +913,18 @@ class SetupView(discord.ui.View):
 
     def status_embed(self):
         settings = self.settings
-        sample = dict(SAMPLE_ORDER)
-        for entry in questions_of(settings):
-            sample.setdefault(
-                entry["field"],
-                "2" if entry.get("kind") == "number" else entry["label"],
-            )
-        preview = render(settings["confirm_format"], sample, self.ctx.author.id, self.ctx.guild)
-        asked = "a modal" if modal_ready(settings) else "one question at a time"
+        preview = render(settings["confirm_format"], SAMPLE_ORDER, self.ctx.author.id, self.ctx.guild)
+        asked = ", ".join(
+            q["label"].splitlines()[0][:30] for q in questions_of(settings)
+        )
         lines = [
             "**confirmation setup**",
             "",
-            f"**form button** : {settings.get('form_button') or DEFAULT_FORM_BUTTON}",
-            f"**form asks** : {len(questions_of(settings))} questions, {asked}",
             f"**confirm button** : {settings['confirm_button']}",
             f"**terms button** : {settings['terms_button']}",
             f"**payment methods** : {len(settings.get('payment_methods') or [])}",
+            f"**order form** : {len(questions_of(settings))} questions",
+            f"-# {asked}",
             "",
             "**confirm box preview**",
             preview[:800],
@@ -1256,8 +986,8 @@ class SetupView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="questions", style=discord.ButtonStyle.secondary, row=3)
-    async def questions(self, interaction, button):
+    @discord.ui.button(label="order form", style=discord.ButtonStyle.secondary, row=3)
+    async def order_form(self, interaction, button):
         view = QuestionsView(self)
         await interaction.response.send_message(
             embed=view.status_embed(),
@@ -1265,37 +995,10 @@ class SetupView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="form button", style=discord.ButtonStyle.secondary, row=3)
-    async def form_button(self, interaction, button):
-        await self.edit(interaction, "form_button", "order form button label", limit=LABEL_LIMIT)
-
-    @discord.ui.button(label="form text", style=discord.ButtonStyle.secondary, row=4)
-    async def form_text(self, interaction, button):
-        await self.edit(interaction, "form_text", "text above the form button", multiline=True, required=False, limit=1000)
-
-    @discord.ui.button(label="placeholders", style=discord.ButtonStyle.secondary, row=4)
-    async def placeholders(self, interaction, button):
-        await interaction.response.send_message(
-            embed=embeds.build(
-                "**placeholders**\n\n"
-                "drop these into any format and the bot fills them in.\n\n"
-                + placeholder_list(self.settings)
-            ),
-            ephemeral=True,
-        )
-
 
 class Confirmation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._views_added = False
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        if self._views_added:
-            return
-        self._views_added = True
-        self.bot.add_view(FormPanel(defaults()))
 
     async def cog_command_error(self, ctx, error):
         if isinstance(error, commands.NoPrivateMessage):
@@ -1324,31 +1027,12 @@ class Confirmation(commands.Cog):
         notes="any extra notes (optional)",
     )
     @commands.guild_only()
-    async def confirmation(self, ctx, item: str = None, price: str = None,
-                           quantity: str = None, *, notes: str = None):
+    async def confirmation(self, ctx, item: str, price: str, quantity: str, *, notes: str = None):
         settings = settings_for(ctx.guild.id)
-
-        if item is None:
-            if (ctx.channel.id, ctx.author.id) in active:
-                await ctx.send(embed=embeds.error("you already have a form open here."))
-                return
-
-            active.add((ctx.channel.id, ctx.author.id))
-            try:
-                order = await ask_questions(self.bot, ctx.channel, ctx.author, settings)
-            finally:
-                active.discard((ctx.channel.id, ctx.author.id))
-
-            if order is None:
-                return
-
-            await post_confirmation(ctx.channel, ctx.author, settings, order, ctx.guild)
-            return
-
         order = {
             "item": item.strip(),
-            "price": (price or "").strip(),
-            "quantity": (quantity or "").strip(),
+            "price": price.strip(),
+            "quantity": quantity.strip(),
             "notes": (notes or "").strip(),
         }
         view = ConfirmView(settings, order, ctx.author.id, ctx.guild)
@@ -1356,17 +1040,6 @@ class Confirmation(commands.Cog):
             view=view,
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
         )
-
-    @confirmation.command(name="panel", description="Post the order form button here.")
-    @app_commands.default_permissions(manage_messages=True)
-    @commands.has_permissions(manage_messages=True)
-    @commands.guild_only()
-    async def panel(self, ctx, *, text: str = None):
-        settings = ensure_config(ctx.guild.id)
-        save_config()
-        await ctx.channel.send(view=FormPanel(settings, ctx.guild, text))
-        if ctx.interaction:
-            await ctx.send(embed=embeds.notice("panel posted."), ephemeral=True)
 
     @confirmation.command(name="setup", description="Set up the confirmation formats.")
     @app_commands.default_permissions(manage_guild=True)
@@ -1380,19 +1053,6 @@ class Confirmation(commands.Cog):
             embed=view.status_embed(),
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @confirmation.command(name="fields", description="Show the order form placeholders.")
-    @commands.guild_only()
-    async def fields(self, ctx):
-        settings = settings_for(ctx.guild.id)
-        await ctx.send(
-            embed=embeds.build(
-                "**order form**\n\n"
-                f"`{display_prefix(ctx)}confirmation` fills the form here.\n"
-                f"`{display_prefix(ctx)}confirmation panel` posts the button.\n\n"
-                + placeholder_list(settings)
-            )
         )
 
 
