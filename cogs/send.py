@@ -61,6 +61,7 @@ SEND_MODES = [
     ("text", "Plain text", "A normal message. No embed."),
     ("embed_title", "Embed with header", "Embed with a title at the top."),
     ("embed_plain", "Embed without header", "Embed with no title. Slimmer."),
+    ("container", "Container", "A plain box around the text. No accent bar."),
 ]
 
 MODE_KEYS = {m[0] for m in SEND_MODES}
@@ -108,9 +109,35 @@ def new_draft():
         "repeat": "none",
     }
 
+class ContainerView(discord.ui.LayoutView):
+    def __init__(self, draft):
+        super().__init__(timeout=None)
+        box = discord.ui.Container()
+
+        title = (draft.get("title") or "").strip()
+        body = (draft.get("description") or "").strip()
+
+        if title:
+            box.add_item(discord.ui.TextDisplay(f"### {title}"[:4000]))
+            if body:
+                box.add_item(discord.ui.Separator())
+        if body:
+            box.add_item(discord.ui.TextDisplay(body[:4000]))
+        if draft.get("image_url"):
+            box.add_item(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(draft["image_url"])
+                )
+            )
+
+        self.add_item(box)
+
 def build_payload(draft):
     if draft["mode"] == "text":
         return draft["content"][:2000], None
+
+    if draft["mode"] == "container":
+        return None, None
 
     embed = discord.Embed(
         description=draft["description"][:4096],
@@ -124,6 +151,25 @@ def build_payload(draft):
         embed.set_thumbnail(url=draft["thumbnail_url"])
 
     return None, embed
+
+def build_view(draft):
+    return ContainerView(draft) if draft["mode"] == "container" else None
+
+def draft_body(draft):
+    if draft["mode"] == "text":
+        return draft.get("content") or ""
+    return draft.get("description") or ""
+
+async def deliver(channel, draft, mentions):
+    content, embed = build_payload(draft)
+    view = build_view(draft)
+
+    if view is not None:
+        return await channel.send(view=view, allowed_mentions=mentions)
+
+    return await channel.send(
+        content=content, embed=embed, allowed_mentions=mentions
+    )
 
 def save_scheduled():
     _schedule_store.save(scheduled)
@@ -186,7 +232,10 @@ def draft_problems(draft, guild, author):
         if not draft["content"].strip():
             problems.append("some message text")
     elif not draft["description"].strip():
-        problems.append("an embed description")
+        problems.append(
+            "some text for the box" if draft["mode"] == "container"
+            else "an embed description"
+        )
 
     channel = guild.get_channel(draft["channel_id"]) if draft["channel_id"] else None
 
@@ -216,6 +265,44 @@ class TextComposeModal(discord.ui.Modal, title="Message Text"):
     async def on_submit(self, interaction):
         await interaction.response.defer()
         self.builder.draft["content"] = self.f_content.value
+        await self.builder.refresh()
+
+class ContainerComposeModal(discord.ui.Modal, title="Container Content"):
+    def __init__(self, builder):
+        super().__init__()
+        self.builder = builder
+        draft = builder.draft
+
+        self.f_title = discord.ui.TextInput(
+            label="Heading",
+            default=draft["title"],
+            placeholder="optional, shows as bold text on top",
+            max_length=256,
+            required=False,
+        )
+        self.f_desc = discord.ui.TextInput(
+            label="Text",
+            default=draft["description"],
+            style=discord.TextStyle.paragraph,
+            max_length=4000,
+            required=True,
+        )
+        self.f_image = discord.ui.TextInput(
+            label="Image URL",
+            default=draft.get("image_url") or "",
+            placeholder="https://... shows inside the box",
+            required=False,
+        )
+
+        for item in (self.f_title, self.f_desc, self.f_image):
+            self.add_item(item)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer()
+        draft = self.builder.draft
+        draft["title"] = self.f_title.value
+        draft["description"] = self.f_desc.value
+        draft["image_url"] = clean_url(self.f_image.value)
         await self.builder.refresh()
 
 class EmbedComposeModal(discord.ui.Modal, title="Embed Content"):
@@ -423,8 +510,7 @@ class TemplateSaveModal(discord.ui.Modal, title="Save Template"):
         builder = self.panel.builder
         draft = builder.draft
 
-        body = draft["content"] if draft["mode"] == "text" else draft["description"]
-        if not (body or "").strip():
+        if not draft_body(draft).strip():
             await interaction.response.send_message(
                 embed=embeds.error("write something first, then save it."), ephemeral=True
             )
@@ -604,11 +690,7 @@ class SendBuilderView(discord.ui.View):
             else None
         )
 
-        if draft["mode"] == "text":
-            body = draft["content"] or "nothing written yet"
-        else:
-            body = draft["description"] or "nothing written yet"
-
+        body = draft_body(draft) or "nothing written yet"
         preview = body if len(body) <= 200 else body[:200] + "..."
 
         if draft.get("when"):
@@ -689,16 +771,27 @@ class SendBuilderView(discord.ui.View):
     async def write(self, interaction, button):
         if self.draft["mode"] == "text":
             await interaction.response.send_modal(TextComposeModal(self))
+        elif self.draft["mode"] == "container":
+            await interaction.response.send_modal(ContainerComposeModal(self))
         else:
             await interaction.response.send_modal(EmbedComposeModal(self))
 
     @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, row=2)
     async def preview(self, interaction, button):
-        content, embed = build_payload(self.draft)
-
-        if not content and embed is None:
+        if not draft_body(self.draft).strip():
             await interaction.response.send_message(
                 embed=embeds.error("nothing written yet."), ephemeral=True
+            )
+            return
+
+        content, embed = build_payload(self.draft)
+        view = build_view(self.draft)
+
+        if view is not None:
+            await interaction.response.send_message(
+                view=view,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
@@ -795,8 +888,6 @@ class SendBuilderView(discord.ui.View):
             self.stop()
             return
 
-        content, embed = build_payload(self.draft)
-
         if self.draft["pings"]:
             mentions = discord.AllowedMentions(everyone=True, roles=True, users=True)
         else:
@@ -805,9 +896,7 @@ class SendBuilderView(discord.ui.View):
         await interaction.response.defer()
 
         try:
-            sent = await channel.send(
-                content=content, embed=embed, allowed_mentions=mentions
-            )
+            sent = await deliver(channel, self.draft, mentions)
         except discord.Forbidden:
             await interaction.followup.send(
                 embed=embeds.error("i can't post in that channel."), ephemeral=True
@@ -998,7 +1087,6 @@ class Send(commands.Cog):
 
             if not skip:
                 draft = job["draft"]
-                content, embed = build_payload(draft)
 
                 if draft.get("pings"):
                     mentions = discord.AllowedMentions(
@@ -1008,9 +1096,7 @@ class Send(commands.Cog):
                     mentions = discord.AllowedMentions.none()
 
                 try:
-                    await channel.send(
-                        content=content, embed=embed, allowed_mentions=mentions
-                    )
+                    await deliver(channel, draft, mentions)
                 except (discord.Forbidden, discord.HTTPException):
                     skip = True
 
