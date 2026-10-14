@@ -21,6 +21,7 @@ DEFAULTS = {
     "add_role_id": None,
     "accept_emoji": "✅",
     "reject_emoji": "❌",
+    "require_role_ids": [],
     "self_vouch": False,
     "enabled": True,
 }
@@ -52,6 +53,56 @@ def keyword_parts(settings):
     text = " ".join(MENTION.sub(" ", raw).split())
     return text, required
 
+def find_mentionable(name, guild):
+    wanted = name.lower()
+    for role in guild.roles:
+        if role.name.lower() == wanted and not role.is_default():
+            return role
+    for member in guild.members:
+        if wanted in (member.name.lower(), member.display_name.lower()):
+            return member
+    return None
+
+def resolve_mentions(raw, guild):
+    if guild is None:
+        return raw, []
+
+    kept = []
+
+    def stash(match):
+        kept.append(match.group(0))
+        return f"\x00{len(kept) - 1}\x00"
+
+    text = MENTION.sub(stash, raw)
+    unknown = []
+
+    def swap_id(match):
+        value = int(match.group(0))
+        if guild.get_role(value) is not None:
+            return f"<@&{value}>"
+        if guild.get_member(value) is not None:
+            return f"<@{value}>"
+        return match.group(0)
+
+    text = MENTION.sub(stash, re.sub(r"\b\d{15,25}\b", swap_id, text))
+
+    def swap_name(match):
+        raw_name = match.group(1)
+        words = raw_name.split()
+        for size in range(len(words), 0, -1):
+            name = " ".join(words[:size])
+            if name.lower() in ("everyone", "here"):
+                return match.group(0)
+            target = find_mentionable(name, guild)
+            if target is not None:
+                return target.mention + raw_name[len(name):]
+        unknown.append(words[0] if words else raw_name)
+        return match.group(0)
+
+    text = re.sub(r"@([^\s@][^@]{0,31})", swap_name, text)
+    text = re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], text)
+    return text, unknown
+
 def text_hit(content, text):
     if not text:
         return True
@@ -66,8 +117,15 @@ def is_vouch(message, settings):
         return False
 
     found = mentioned_ids(message)
-    if required:
-        return all(target in found for _, target in required)
+    wanted = settings.get("require_role_ids") or []
+
+    if required and not all(target in found for _, target in required):
+        return False
+    if wanted and not any(role_id in found for role_id in wanted):
+        return False
+    if required or wanted:
+        return True
+
     if settings.get("self_vouch"):
         return bool(found)
     return any(target != message.author.id for target in found)
@@ -171,6 +229,21 @@ class AddRoleSelect(discord.ui.RoleSelect):
         save_config()
         await self.panel.refresh(interaction)
 
+class RequireRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, panel):
+        super().__init__(
+            placeholder="Role the message has to mention (optional)",
+            min_values=0,
+            max_values=5,
+            row=3,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction):
+        self.panel.settings["require_role_ids"] = [role.id for role in self.values]
+        save_config()
+        await self.panel.refresh(interaction)
+
 class VouchChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, panel):
         super().__init__(
@@ -194,7 +267,7 @@ class KeywordModal(discord.ui.Modal, title="Vouch Keyword"):
         self.f_keyword = discord.ui.TextInput(
             label="Keyword",
             default=keyword_of(panel.settings),
-            placeholder="vouch, or vouch <@123456789012345678>",
+            placeholder="vouch, or vouch @role, or vouch @member",
             max_length=200,
             required=True,
         )
@@ -207,6 +280,19 @@ class KeywordModal(discord.ui.Modal, title="Vouch Keyword"):
                 embed=embeds.error("the keyword can't be blank."), ephemeral=True
             )
             return
+
+        word, unknown = resolve_mentions(word, interaction.guild)
+        if unknown:
+            await interaction.response.send_message(
+                embed=embeds.error(
+                    "i can't find a role or member called "
+                    + ", ".join(f"`@{name}`" for name in unknown)
+                    + ". check the spelling, or paste the id instead."
+                ),
+                ephemeral=True,
+            )
+            return
+
         self.panel.settings["keyword"] = word
         save_config()
         await self.panel.refresh(interaction)
@@ -260,6 +346,7 @@ class VouchSetupView(discord.ui.View):
         self.add_item(RemoveRoleSelect(self))
         self.add_item(AddRoleSelect(self))
         self.add_item(VouchChannelSelect(self))
+        self.add_item(RequireRoleSelect(self))
         self.sync_toggle()
 
     async def interaction_check(self, interaction):
@@ -282,19 +369,23 @@ class VouchSetupView(discord.ui.View):
             state = "off (no channel set)"
 
         word = f"`{text}`" if text else "`anything`"
-        if required:
-            rule = f"a message counts when it has {word} and mentions " + " ".join(
-                token for token, _ in required
-            )
+        wanted = [f"<@&{role_id}>" for role_id in self.settings.get("require_role_ids") or []]
+        targets = [token for token, _ in required]
+
+        if targets or wanted:
+            must = " ".join(targets + wanted)
+            rule = f"a message counts when it has {word} and mentions {must}"
         elif self.settings.get("self_vouch"):
             rule = f"a message counts when it has {word} and mentions anyone"
+            must = "anyone"
         else:
             rule = f"a message counts when it has {word} and mentions someone other than the sender"
+            must = "anyone"
 
         return embeds.build(
             f"**Channel** - {channel.mention if channel else 'none'}\n"
             f"**Keyword** - {word}\n"
-            f"**Must mention** - {' '.join(t for t, _ in required) if required else 'anyone'}\n"
+            f"**Must mention** - {must}\n"
             f"**Removes** - {role_text(guild, self.settings.get('remove_role_id'))}\n"
             f"**Gives** - {role_text(guild, self.settings.get('add_role_id'))}\n"
             f"**Accepted** - {self.settings.get('accept_emoji')}\n"
@@ -308,27 +399,27 @@ class VouchSetupView(discord.ui.View):
         self.sync_toggle()
         await interaction.response.edit_message(embed=self.summary(), view=self)
 
-    @discord.ui.button(label="Keyword", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Keyword", style=discord.ButtonStyle.secondary, row=4)
     async def keyword(self, interaction, button):
         await interaction.response.send_modal(KeywordModal(self))
 
-    @discord.ui.button(label="Reactions", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Reactions", style=discord.ButtonStyle.secondary, row=4)
     async def reactions(self, interaction, button):
         await interaction.response.send_modal(EmojiModal(self))
 
-    @discord.ui.button(label="Self Vouch: off", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Self Vouch: off", style=discord.ButtonStyle.secondary, row=4)
     async def self_toggle(self, interaction, button):
         self.settings["self_vouch"] = not self.settings.get("self_vouch")
         save_config()
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Turn Off", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Turn Off", style=discord.ButtonStyle.secondary, row=4)
     async def toggle(self, interaction, button):
         self.settings["enabled"] = not self.settings.get("enabled")
         save_config()
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.primary, row=4)
     async def done(self, interaction, button):
         for item in self.children:
             item.disabled = True
