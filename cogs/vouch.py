@@ -21,8 +21,11 @@ DEFAULTS = {
     "add_role_id": None,
     "accept_emoji": "✅",
     "reject_emoji": "❌",
+    "self_vouch": False,
     "enabled": True,
 }
+
+MENTION = re.compile(r"<@[!&]?\d{15,25}>")
 
 def save_config():
     _store.save(config)
@@ -42,20 +45,32 @@ def is_ready(settings):
 def keyword_of(settings):
     return (settings.get("keyword") or DEFAULTS["keyword"]).strip()
 
-def keyword_hit(content, keyword):
-    return re.search(rf"(?<!\w){re.escape(keyword.lower())}(?!\w)", content.lower()) is not None
+def keyword_parts(settings):
+    raw = keyword_of(settings)
+    tokens = MENTION.findall(raw)
+    required = [(token, int(re.sub(r"\D", "", token))) for token in tokens]
+    text = " ".join(MENTION.sub(" ", raw).split())
+    return text, required
 
-def vouch_targets(message):
-    found = []
-    for user in message.mentions:
-        if user.bot or user.id == message.author.id:
-            continue
-        if user not in found:
-            found.append(user)
-    for role in message.role_mentions:
-        if role not in found:
-            found.append(role)
-    return found
+def text_hit(content, text):
+    if not text:
+        return True
+    return re.search(rf"(?<!\w){re.escape(text.lower())}(?!\w)", content.lower()) is not None
+
+def mentioned_ids(message):
+    return set(message.raw_mentions) | set(message.raw_role_mentions)
+
+def is_vouch(message, settings):
+    text, required = keyword_parts(settings)
+    if not text_hit(message.content, text):
+        return False
+
+    found = mentioned_ids(message)
+    if required:
+        return all(target in found for _, target in required)
+    if settings.get("self_vouch"):
+        return bool(found)
+    return any(target != message.author.id for target in found)
 
 def emoji_for(settings, key):
     raw = settings.get(key) or DEFAULTS[key]
@@ -138,8 +153,8 @@ class KeywordModal(discord.ui.Modal, title="Vouch Keyword"):
         self.f_keyword = discord.ui.TextInput(
             label="Keyword",
             default=keyword_of(panel.settings),
-            placeholder="vouch",
-            max_length=40,
+            placeholder="vouch, or vouch <@123456789012345678>",
+            max_length=200,
             required=True,
         )
         self.add_item(self.f_keyword)
@@ -211,27 +226,40 @@ class VouchSetupView(discord.ui.View):
 
     def sync_toggle(self):
         self.toggle.label = "Turn Off" if self.settings.get("enabled") else "Turn On"
+        self.self_toggle.label = (
+            "Self Vouch: on" if self.settings.get("self_vouch") else "Self Vouch: off"
+        )
 
     def summary(self):
         guild = self.ctx.guild
         channel_id = self.settings.get("channel_id")
         channel = guild.get_channel(channel_id) if channel_id else None
-        word = keyword_of(self.settings)
+        text, required = keyword_parts(self.settings)
 
         state = "on" if self.settings.get("enabled") else "off"
         if not is_ready(self.settings):
             state = "off (no channel set)"
 
+        word = f"`{text}`" if text else "`anything`"
+        if required:
+            rule = f"a message counts when it has {word} and mentions " + " ".join(
+                token for token, _ in required
+            )
+        elif self.settings.get("self_vouch"):
+            rule = f"a message counts when it has {word} and mentions anyone"
+        else:
+            rule = f"a message counts when it has {word} and mentions someone other than the sender"
+
         return embeds.build(
             f"**Channel** - {channel.mention if channel else 'none'}\n"
-            f"**Keyword** - `{word}`\n"
+            f"**Keyword** - {word}\n"
+            f"**Must mention** - {' '.join(t for t, _ in required) if required else 'anyone'}\n"
             f"**Removes** - {role_text(guild, self.settings.get('remove_role_id'))}\n"
             f"**Gives** - {role_text(guild, self.settings.get('add_role_id'))}\n"
             f"**Accepted** - {self.settings.get('accept_emoji')}\n"
             f"**Rejected** - {self.settings.get('reject_emoji')}\n"
             f"**Status** - {state}\n\n"
-            f"a message counts when it has `{word}` and mentions someone other than "
-            f"the sender, like `{word} @someone`. bots are ignored.",
+            f"{rule}. messages from bots are ignored.",
             title="Vouch Setup",
         )
 
@@ -246,6 +274,12 @@ class VouchSetupView(discord.ui.View):
     @discord.ui.button(label="Reactions", style=discord.ButtonStyle.secondary, row=3)
     async def reactions(self, interaction, button):
         await interaction.response.send_modal(EmojiModal(self))
+
+    @discord.ui.button(label="Self Vouch: off", style=discord.ButtonStyle.secondary, row=3)
+    async def self_toggle(self, interaction, button):
+        self.settings["self_vouch"] = not self.settings.get("self_vouch")
+        save_config()
+        await self.refresh(interaction)
 
     @discord.ui.button(label="Turn Off", style=discord.ButtonStyle.secondary, row=3)
     async def toggle(self, interaction, button):
@@ -292,7 +326,7 @@ class Vouch(commands.Cog):
         if message.channel.id != settings.get("channel_id"):
             return
 
-        accepted = keyword_hit(message.content, keyword_of(settings)) and bool(vouch_targets(message))
+        accepted = is_vouch(message, settings)
         await react(message, settings, accepted)
 
         if accepted and isinstance(message.author, discord.Member):
