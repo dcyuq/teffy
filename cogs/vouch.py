@@ -72,6 +72,47 @@ def is_vouch(message, settings):
         return bool(found)
     return any(target != message.author.id for target in found)
 
+NAME_TOKEN = re.compile(r"^:?([A-Za-z0-9_~]{2,32}):?$")
+
+def find_emoji(name, guild, client):
+    base = re.sub(r"~\d+$", "", name).lower()
+    if guild is not None:
+        for emoji in guild.emojis:
+            if emoji.name.lower() == base:
+                return emoji
+    if client is not None:
+        for emoji in client.emojis:
+            if emoji.name.lower() == base:
+                return emoji
+    return None
+
+def resolve_emoji(raw, guild, client):
+    text = (raw or "").strip()
+    if not text:
+        return None, "give me an emoji."
+
+    if text.startswith("<"):
+        if not emojiutils.CUSTOM_EMOJI.match(text):
+            return None, (
+                "that custom emoji is not in a form i can read. type a backslash "
+                "before it and paste what discord gives you, like "
+                "`<:name:123456789012345678>`."
+            )
+        emoji_id = int(text.rstrip(">").rsplit(":", 1)[-1])
+        if client is not None and client.get_emoji(emoji_id) is None:
+            return None, "i can't use that emoji. it has to be from a server i'm also in."
+        return text, None
+
+    named = NAME_TOKEN.match(text)
+    if named:
+        found = find_emoji(named.group(1), guild, client)
+        if found is not None:
+            return str(found), None
+        if text.startswith(":") or text.endswith(":"):
+            return None, f"i can't find an emoji named `{named.group(1)}` in any server i'm in."
+
+    return emojiutils.parse(text, guild)
+
 def emoji_for(settings, key):
     raw = settings.get(key) or DEFAULTS[key]
     return emojiutils.to_partial(raw) or raw
@@ -177,14 +218,14 @@ class EmojiModal(discord.ui.Modal, title="Vouch Reactions"):
         self.f_accept = discord.ui.TextInput(
             label="Accepted reaction",
             default=panel.settings.get("accept_emoji") or DEFAULTS["accept_emoji"],
-            placeholder="✅ or <:name:123456789012345678>",
+            placeholder="✅ or :rightteffy: or <:name:123456789012345678>",
             max_length=100,
             required=True,
         )
         self.f_reject = discord.ui.TextInput(
             label="Rejected reaction",
             default=panel.settings.get("reject_emoji") or DEFAULTS["reject_emoji"],
-            placeholder="❌ or <:name:123456789012345678>",
+            placeholder="❌ or :wrongteffy: or <:name:123456789012345678>",
             max_length=100,
             required=True,
         )
@@ -192,14 +233,14 @@ class EmojiModal(discord.ui.Modal, title="Vouch Reactions"):
         self.add_item(self.f_reject)
 
     async def on_submit(self, interaction):
-        accept, problem = emojiutils.parse(self.f_accept.value, interaction.guild)
+        accept, problem = resolve_emoji(self.f_accept.value, interaction.guild, interaction.client)
         if problem:
             await interaction.response.send_message(
                 embed=embeds.error(problem, title="Bad accepted reaction"), ephemeral=True
             )
             return
 
-        reject, problem = emojiutils.parse(self.f_reject.value, interaction.guild)
+        reject, problem = resolve_emoji(self.f_reject.value, interaction.guild, interaction.client)
         if problem:
             await interaction.response.send_message(
                 embed=embeds.error(problem, title="Bad rejected reaction"), ephemeral=True
