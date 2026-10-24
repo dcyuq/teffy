@@ -14,6 +14,11 @@ from discord.ext import commands
 
 import embeds
 from . import confirmation
+
+try:
+    from . import pay
+except Exception:
+    pay = None
 from prefixes import display_prefix
 import emojiutils
 from storage import Store, IntKeyStore
@@ -665,6 +670,14 @@ async def ask_in_channel(client, channel, user, questions):
 
     return answers
 
+def pay_enabled(guild_id, key):
+    if pay is None or not key:
+        return False
+    try:
+        return pay.enabled_for(guild_id, key)
+    except Exception:
+        return False
+
 async def create_ticket(interaction, button_data, answers):
     guild = interaction.guild
     settings = get_config(guild.id)
@@ -790,6 +803,8 @@ async def create_ticket(interaction, button_data, answers):
             welcome,
             detail,
             settings["panel"]["color"],
+            False,
+            pay_enabled(guild.id, button_data.get("key")),
         )
 
     opening_message = await channel.send(
@@ -1571,7 +1586,7 @@ class TicketConfirmationView(discord.ui.LayoutView):
 
 class TicketControlView(discord.ui.LayoutView):
     def __init__(self, ping=None, heading=None, body=None, detail=None, color=None,
-                 order_form=False):
+                 order_form=False, pay_button=False):
         super().__init__(timeout=None)
         if ping:
             self.add_item(discord.ui.TextDisplay(ping))
@@ -1593,6 +1608,8 @@ class TicketControlView(discord.ui.LayoutView):
         controls = TicketControls()
         if order_form:
             controls.add_item(OrderFormButton())
+        if pay_button and pay is not None:
+            controls.add_item(pay.PayButton())
         self.add_item(controls)
 
 class EmbedEditModal(discord.ui.Modal, title="Panel Appearance"):
@@ -2366,7 +2383,7 @@ class Tickets(commands.Cog):
             return
         self._views_added = True
 
-        self.bot.add_view(TicketControlView(order_form=True))
+        self.bot.add_view(TicketControlView(order_form=True, pay_button=True))
         self.bot.add_view(LogControlView())
 
         for guild_key, settings in config.items():
