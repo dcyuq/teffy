@@ -70,8 +70,14 @@ class PayButton(discord.ui.Button):
 
     async def callback(self, interaction):
         settings = confirmation.settings_for(interaction.guild.id)
+        if not settings.get("payment_methods"):
+            await interaction.response.send_message(
+                embed=embeds.error("no payment methods have been set up yet."),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
-            view=PayTermsView(settings, interaction.user, interaction.guild),
+            view=PayMethodsView(settings, interaction.user, interaction.guild),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -96,51 +102,14 @@ class PayPanelView(discord.ui.LayoutView):
         box.add_item(row)
         self.add_item(box)
 
-class PayTermsRow(discord.ui.ActionRow):
-    def __init__(self, parent, label, guild):
-        super().__init__()
-        self.owner = parent
-        confirmation.apply_label(self.agree, label, guild, confirmation.DEFAULT_TERMS_BUTTON)
-
-    @discord.ui.button(style=discord.ButtonStyle.secondary)
-    async def agree(self, interaction, button):
-        await self.owner.agree(interaction)
-
-class PayTermsView(discord.ui.LayoutView):
+class PayMethodsView(discord.ui.View):
     def __init__(self, settings, user, guild):
         super().__init__(timeout=600)
         self.settings = settings
         self.user = user
         self.guild = guild
 
-        ping = render(settings.get("ping"), user, guild).strip()
-        if ping:
-            self.add_item(discord.ui.TextDisplay(ping[:TEXT_LIMIT]))
-
-        box = discord.ui.Container()
-        box.add_item(discord.ui.TextDisplay(
-            render(
-                settings.get("terms_format") or confirmation.DEFAULT_TERMS_FORMAT,
-                user,
-                guild,
-            )[:4000]
-        ))
-        box.add_item(discord.ui.Separator())
-        box.add_item(PayTermsRow(self, settings.get("terms_button"), guild))
-        self.add_item(box)
-
-    async def agree(self, interaction):
-        await interaction.response.send_message(
-            view=PayMethodsView(self.settings, interaction.user, interaction.guild),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-class PayMethodRow(discord.ui.ActionRow):
-    def __init__(self, parent, methods, guild):
-        super().__init__()
-        self.owner = parent
-
-        for method in methods:
+        for method in (settings.get("payment_methods") or [])[:25]:
             button = discord.ui.Button(style=discord.ButtonStyle.secondary)
             confirmation.apply_label(
                 button, method.get("label"), guild, method.get("id", "payment")
@@ -150,40 +119,11 @@ class PayMethodRow(discord.ui.ActionRow):
 
     def _callback(self, method):
         async def callback(interaction):
-            await self.owner.pay(interaction, method)
+            await interaction.response.send_message(
+                view=PayMethodView(self.settings, interaction.user, interaction.guild, method),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         return callback
-
-class PayMethodsView(discord.ui.LayoutView):
-    def __init__(self, settings, user, guild):
-        super().__init__(timeout=600)
-        self.settings = settings
-        self.user = user
-        self.guild = guild
-
-        box = discord.ui.Container()
-        box.add_item(discord.ui.TextDisplay(
-            render(
-                settings.get("received_format") or confirmation.DEFAULT_RECEIVED,
-                user,
-                guild,
-            )[:4000]
-        ))
-        box.add_item(discord.ui.Separator())
-
-        methods = settings.get("payment_methods") or []
-        if not methods:
-            box.add_item(discord.ui.TextDisplay("no payment methods have been configured."))
-        else:
-            for index in range(0, len(methods), 5):
-                box.add_item(PayMethodRow(self, methods[index:index + 5], guild))
-
-        self.add_item(box)
-
-    async def pay(self, interaction, method):
-        await interaction.response.send_message(
-            view=PayMethodView(self.settings, interaction.user, interaction.guild, method),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
 
 class PayMethodView(discord.ui.LayoutView):
     def __init__(self, settings, user, guild, method):
