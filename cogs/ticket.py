@@ -779,14 +779,18 @@ async def create_ticket(interaction, button_data, answers):
         f"**{question[:256]}**\n{(answer or '-')[:1024]}" for question, answer in answers
     ) or None
 
-    opening_view = TicketControlView(
-        ping,
-        heading,
-        welcome,
-        detail,
-        settings["panel"]["color"],
-        bool(button_data.get("confirmation_mode")),
-    )
+    if button_data.get("confirmation_mode"):
+        opening_view = TicketConfirmationView(
+            guild, ping, answers, interaction.user.id
+        )
+    else:
+        opening_view = TicketControlView(
+            ping,
+            heading,
+            welcome,
+            detail,
+            settings["panel"]["color"],
+        )
 
     opening_message = await channel.send(
         view=opening_view,
@@ -1114,24 +1118,40 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
             pass
 
 class TicketQuestionModal(discord.ui.Modal):
-    def __init__(self, button_data):
+    def __init__(self, button_data, questions=None):
         super().__init__(title=button_data["label"][:45])
         self.button_data = button_data
+        self.questions = list(questions or button_data.get("questions") or [])[:MAX_QUESTIONS]
         self.inputs = []
 
-        for question in button_data["questions"][:MAX_QUESTIONS]:
+        for index, question in enumerate(self.questions):
             field = discord.ui.TextInput(
-                label=question["label"][:45],
+                label=short_label(question, index)[:45],
+                placeholder=question_hint(question)[:100],
                 style=discord.TextStyle.short,
-                required=question.get("required", True),
+                required=question.get("required", not question.get("skippable", False)),
                 max_length=1000,
             )
-            self.inputs.append((question["label"], field))
+            self.inputs.append((question, field))
             self.add_item(field)
 
     async def on_submit(self, interaction):
+        for index, (question, field) in enumerate(self.inputs):
+            value = (field.value or "").strip()
+            if value and question_kind(question, index) == "number" and not is_number(value):
+                await interaction.response.send_message(
+                    embed=embeds.error(
+                        f"**{short_label(question, index)}** only takes numbers."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
         await interaction.response.defer(ephemeral=True)
-        answers = [(label, field.value) for label, field in self.inputs]
+        answers = [
+            (short_label(question, index), field.value)
+            for index, (question, field) in enumerate(self.inputs)
+        ]
         await create_ticket(interaction, self.button_data, answers)
 
 class TicketOpenButton(discord.ui.Button):
@@ -1160,9 +1180,12 @@ class TicketOpenButton(discord.ui.Button):
             return
 
         if button_data.get("confirmation_mode"):
-            await interaction.response.defer(ephemeral=True)
-            await create_ticket(interaction, button_data, [])
-            return
+            questions = form_questions(interaction.guild.id)
+            if questions:
+                await interaction.response.send_modal(
+                    TicketQuestionModal(button_data, questions)
+                )
+                return
 
         if button_data.get("questions"):
             await interaction.response.send_modal(TicketQuestionModal(button_data))
@@ -1239,10 +1262,13 @@ class TicketSelect(discord.ui.Select):
             return
 
         if button_data.get("confirmation_mode"):
-            await interaction.response.defer(ephemeral=True)
-            await self.reset(interaction)
-            await create_ticket(interaction, button_data, [])
-            return
+            questions = form_questions(interaction.guild.id)
+            if questions:
+                await interaction.response.send_modal(
+                    TicketQuestionModal(button_data, questions)
+                )
+                await self.reset(interaction)
+                return
 
         if button_data.get("questions"):
             await interaction.response.send_modal(TicketQuestionModal(button_data))
@@ -1481,6 +1507,16 @@ def short_label(question, index=0):
     line = re.sub(r"[*_`~]", "", line)
     line = re.sub(r"\s+", " ", line).strip()
     return line[:60] or question_variable(question, index)
+
+def question_hint(question):
+    hint = (question.get("hint") or question.get("placeholder") or "").strip()
+    if not hint:
+        lines = (question.get("label") or "").splitlines()[1:]
+        hint = " ".join(line.strip() for line in lines if line.strip())
+    hint = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", hint)
+    hint = re.sub(r":[A-Za-z0-9_~]+:", "", hint)
+    hint = re.sub(r"^\s*-#\s*", "", hint)
+    return re.sub(r"[*_`~]", "", hint).strip()
 
 def question_kind(question, index=0):
     kind = (question.get("kind") or "").strip().lower()
