@@ -2022,6 +2022,11 @@ class ButtonManageView(discord.ui.View):
         self.button_data = button_data
         self.add_item(StyleSelect(builder, button_data))
         self.add_item(ButtonCategorySelect(builder, button_data))
+        self.make_order_button.label = (
+            "Remove Order Button"
+            if button_data.get("confirmation_mode")
+            else "Make Order Button"
+        )
 
     async def interaction_check(self, interaction):
         return interaction.user.id == self.builder.ctx.author.id
@@ -2070,13 +2075,10 @@ class ButtonManageView(discord.ui.View):
     @discord.ui.button(label="Make Order Button", style=discord.ButtonStyle.primary, row=2)
     async def make_order_button(self, interaction, button):
         if self.button_data.get("confirmation_mode"):
-            await interaction.response.send_message(
-                embed=embeds.notice("this button is already an Order button. You can customize its questions below."),
-                ephemeral=True,
-            )
-            return
-
-        apply_order_preset(self.button_data)
+            self.button_data["confirmation_mode"] = False
+            self.button_data["questions"] = []
+        else:
+            apply_order_preset(self.button_data)
         save_config()
         refreshed = ButtonManageView(self.builder, self.button_data)
         await interaction.response.edit_message(embed=refreshed.summary(), view=refreshed)
