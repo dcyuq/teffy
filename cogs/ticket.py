@@ -794,7 +794,8 @@ async def create_ticket(interaction, button_data, answers):
 
     if button_data.get("confirmation_mode"):
         opening_view = TicketConfirmationView(
-            guild, ping, answers, interaction.user.id
+            guild, ping, answers, interaction.user.id,
+            pay_button=pay_enabled(guild.id, button_data.get("key")),
         )
     else:
         opening_view = TicketControlView(
@@ -1456,6 +1457,9 @@ class OrderFormButton(discord.ui.Button):
                     answers,
                     data["opener_id"],
                     confirmation_order(answers, questions),
+                    pay_button=pay_enabled(
+                        interaction.guild.id, data.get("button_key")
+                    ),
                 ),
                 allowed_mentions=discord.AllowedMentions(
                     users=True, roles=roles or False
@@ -1565,7 +1569,7 @@ def confirmation_order(answers, questions=None):
     return order
 
 class TicketConfirmationView(discord.ui.LayoutView):
-    def __init__(self, guild, ping, answers, author_id, order=None):
+    def __init__(self, guild, ping, answers, author_id, order=None, pay_button=False):
         super().__init__(timeout=None)
         settings = confirmation.settings_for(guild.id)
         if order is None:
@@ -1581,6 +1585,8 @@ class TicketConfirmationView(discord.ui.LayoutView):
         container.add_item(discord.ui.Separator())
         row = discord.ui.ActionRow()
         row.add_item(TicketConfirmButton(settings, order, author_id, guild))
+        if pay_button and pay is not None:
+            row.add_item(pay.PayButton())
         container.add_item(row)
         self.add_item(container)
 
