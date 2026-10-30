@@ -1583,10 +1583,12 @@ class TicketConfirmationView(discord.ui.LayoutView):
         )
         container.add_item(discord.ui.TextDisplay(receipt[:4000]))
         container.add_item(discord.ui.Separator())
-        row = discord.ui.ActionRow()
-        row.add_item(TicketConfirmButton(settings, order, author_id, guild))
         if pay_button and pay is not None:
+            row = TicketControls()
             row.add_item(pay.PayButton())
+        else:
+            row = discord.ui.ActionRow()
+            row.add_item(TicketConfirmButton(settings, order, author_id, guild))
         container.add_item(row)
         self.add_item(container)
 
